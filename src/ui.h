@@ -16,11 +16,15 @@ struct UiHost {
   virtual void OpenDiagnostics() = 0;
   virtual bool HasHaptics() = 0;
   virtual bool HasActionButton() = 0;
+  virtual LPARAM RemoteButtons() = 0;      // BTN_* bits pressed right now
+  virtual LPARAM RemoteSeen() = 0;         // BTN_* bits pressed at least once so far
+  virtual bool RemoteConnected() = 0;
   virtual bool Autostart() = 0;
   virtual void SetAutostartPref(bool on) = 0;
 };
 
 void ShowSettingsWindow(HINSTANCE inst, UiHost* host);
 void RefreshSettingsWindow();  // status or settings changed elsewhere
+void RepaintSettingsWindow();  // only the live parts changed (remote check)
 void CloseSettingsWindow();
 bool IsSettingsDialogMessage(MSG* msg);

@@ -22,6 +22,12 @@ int dropped = 0;
 double lastWrite = -1e9;
 bool replyAsIndex01 = true;  // the real device answers 0xFF requests as device 0x01
 bool receiver = false;       // simulate a Logi Bolt receiver instead of Bluetooth
+// "Quirky" remote: lists the hard press without the divertable flag, tags its button
+// events with a non-zero software ID, and drops the first command that diverts the
+// hard press (no answer). Each of these used to leave the hard press dead.
+bool quirky = false;
+bool droppedHardOnce = false;
+int deliberateDrops = 0;
 const uint8_t kSlot = 2;     // the Spotlight's pairing slot on the receiver
 const uint8_t kOtherSlot = 1;  // another Logitech device (a mouse) on the same receiver
 std::atomic<int> opens{0};
@@ -162,8 +168,9 @@ void Handle(const uint8_t* q) {
       if (fn == 1) {
         if (p[0] >= sizeof kCtls / sizeof kCtls[0]) return Error(q, 2);
         const Ctl& c = kCtls[p[0]];
-        return Reply(q, {uint8_t(c.cid >> 8), uint8_t(c.cid), 0, 0, uint8_t(c.flags & 0xFF), 0,
-                         c.group, c.gmask, uint8_t(c.flags >> 8)});
+        const uint16_t flags = (quirky && c.cid == 0x01A8) ? 0x0200 : c.flags;
+        return Reply(q, {uint8_t(c.cid >> 8), uint8_t(c.cid), 0, 0, uint8_t(flags & 0xFF), 0,
+                         c.group, c.gmask, uint8_t(flags >> 8)});
       }
       const uint16_t cid = uint16_t((p[0] << 8) | p[1]);
       if (fn == 2) {
@@ -171,6 +178,11 @@ void Handle(const uint8_t* q) {
         return Reply(q, {p[0], p[1], reporting[cid], uint8_t(rm >> 8), uint8_t(rm)});
       }
       if (fn == 3) {
+        if (quirky && cid == 0x01A8 && (p[2] & 0x01) && !droppedHardOnce) {
+          droppedHardOnce = true;  // swallowed: no answer at all
+          ++deliberateDrops;
+          return;
+        }
         uint8_t st = reporting.count(cid) ? reporting[cid] : 0;
         const uint8_t f = p[2];
         if (f & 0x02) st = uint8_t((st & ~0x01) | (f & 0x01));  // divert (+ dvalid)
@@ -195,7 +207,7 @@ void PressButtons(std::initializer_list<uint16_t> cids) {
   r[0] = 0x11;
   r[1] = receiver ? kSlot : 0x01;
   r[2] = 11;
-  r[3] = 0x00;
+  r[3] = quirky ? 0x05 : 0x00;
   size_t i = 4;
   for (uint16_t c : cids) {
     r[i++] = uint8_t(c >> 8);
@@ -231,6 +243,8 @@ void AnnounceReconnect() {
 }
 
 void SetReceiverMode(bool on) { receiver = on; }
+void SetQuirky(bool on) { quirky = on; }
+int DeliberateDrops() { return deliberateDrops; }
 
 }  // namespace mock
 

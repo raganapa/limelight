@@ -73,8 +73,13 @@ std::vector<LPARAM> Buttons() {
 
 int main(int argc, char** argv) {
   const bool rx = argc > 1 && strcmp(argv[1], "receiver") == 0;
+  const bool quirky = argc > 1 && strcmp(argv[1], "quirky") == 0;
   mock::SetReceiverMode(rx);
-  printf("=== %s ===\n", rx ? "Logi Bolt receiver" : "Bluetooth");
+  mock::SetQuirky(quirky);
+  printf("=== %s ===\n", rx ? "Logi Bolt receiver"
+                      : quirky ? "Bluetooth, quirky remote (hard press not flagged, events "
+                                 "tagged, first command dropped)"
+                               : "Bluetooth");
   WNDCLASSW wc{};
   wc.lpfnWndProc = Wnd;
   wc.hInstance = GetModuleHandleW(nullptr);
@@ -106,11 +111,11 @@ int main(int argc, char** argv) {
   printf("buttons\n");
   g_events.clear();
   mock::PressButtons({0x00D8});
-  Pump(80);
+  Pump(150);
   mock::PressButtons({0x00D8, 0x01A8});
-  Pump(80);
+  Pump(150);
   mock::PressButtons({0x00D8});
-  Pump(80);
+  Pump(150);
   mock::PressButtons({});
   Pump(120);
   auto b = Buttons();
@@ -181,6 +186,7 @@ int main(int argc, char** argv) {
   CHECK(Rep(0x00D8) == 0);
   CHECK(Rep(0x01A8) == 0);
   CHECK(mock::dropped == 0);  // never sent commands faster than the remote accepts
+  if (quirky) CHECK(mock::DeliberateDrops() == 1);
 
   printf("\n%s (%d failure%s)\n", g_failures ? "FAILED" : "PASSED", g_failures,
          g_failures == 1 ? "" : "s");

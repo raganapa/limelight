@@ -1,11 +1,22 @@
 name: build
 
+# Builds Limelight.exe and Limelight-Setup.exe on every push, tests them on Windows,
+# and attaches them to a GitHub release:
+#   * automatically when you publish a release (Releases -> Draft a new release), or
+#   * for a release that already exists: Actions -> build -> Run workflow -> enter its tag.
+
 on:
   push:
     branches: [main, master]
-    tags: ["v*"]
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Attach the .exe files to this existing release (for example v1.0.1)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -24,19 +35,16 @@ jobs:
       - name: Build Limelight.exe, Limelight-Setup.exe and the tests
         run: bash build.sh test
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Limelight
-          path: |
-            dist/Limelight.exe
-            dist/Limelight-Setup.exe
+      # Everything goes into one flat folder, so the files sit at the top of the artifact.
+      - name: Collect the files
+        run: |
+          mkdir -p out
+          cp dist/Limelight.exe dist/Limelight-Setup.exe build/test_presenter.exe out/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tests
-          path: |
-            build/test_presenter.exe
-            dist/Limelight.exe
+          name: Limelight
+          path: out/
 
   test-on-windows:
     needs: build
@@ -44,7 +52,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: tests
+          name: Limelight
 
       - name: HID++ logic against the simulated remote
         run: |
@@ -52,8 +60,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           .\test_presenter.exe receiver
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          .\test_presenter.exe quirky
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      # Informational: a runner without a real desktop must not block a release.
       - name: Smoke test (shows the spotlight for 5 seconds, then quits)
+        continue-on-error: true
         run: |
           $p = Start-Process -FilePath .\Limelight.exe -ArgumentList '--background','--demo=spotlight' -PassThru
           Start-Sleep -Seconds 9
@@ -64,16 +76,17 @@ jobs:
           $log
           if (-not ($log -match 'overlay: \d+ frames')) { Write-Error 'no frames were rendered'; exit 1 }
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  attach-to-release:
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     needs: [build, test-on-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: Limelight
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            Limelight-Setup.exe
-            Limelight.exe
+
+      - name: Attach Limelight-Setup.exe and Limelight.exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" Limelight-Setup.exe Limelight.exe --clobber --repo "$GITHUB_REPOSITORY"

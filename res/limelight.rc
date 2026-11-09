@@ -7,8 +7,8 @@ IDI_TRAY ICON "tray.ico"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "limelight.manifest"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,0,1,0
+ PRODUCTVERSION 1,0,1,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -21,12 +21,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Limelight (open source)"
             VALUE "FileDescription", "Limelight - effects for the Logitech Spotlight 2"
-            VALUE "FileVersion", "1.0.0"
+            VALUE "FileVersion", "1.0.1"
             VALUE "InternalName", "Limelight"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "Limelight.exe"
             VALUE "ProductName", "Limelight"
-            VALUE "ProductVersion", "1.0.0"
+            VALUE "ProductVersion", "1.0.1"
         END
     END
     BLOCK "VarFileInfo"

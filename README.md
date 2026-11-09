@@ -88,6 +88,10 @@ show what every button sends (option 2) and test vibration (option 3).
 
 ## Troubleshooting
 
+- **Check what the app receives:** open Settings and press the highlight button lightly, then
+  hard. *Light press* and *Hard press* in the **Remote check** row light up while pressed (and get
+  a tick once seen). If neither lights up but the spotlight still appears, the app is not getting
+  the remote's button messages; send the log file below.
 - **"Looking for your Spotlight 2…"** — press any button to wake the remote. Over Bluetooth,
   make sure it is paired in Windows Settings. With the USB receiver, make sure the receiver that
   came with the remote is plugged in.
@@ -116,13 +120,18 @@ pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-nsis
 ./build.sh
 ```
 
-The GitHub Actions workflow in `.github/workflows/build.yml` builds both files on every push,
-runs the protocol tests and a smoke test on a real Windows runner, and attaches the files to a
-release when you push a tag such as `v1.0.0`.
+The GitHub Actions workflow in `.github/workflows/build.yml` builds both files on every push and
+runs the protocol tests on a real Windows runner. **To publish a release with the .exe files:**
+on GitHub go to *Releases → Draft a new release*, create a tag such as `v1.0.1`, and click
+*Publish*. A few minutes later `Limelight-Setup.exe` and `Limelight.exe` appear under the
+release's *Assets*. For a release that already exists, open *Actions → build → Run workflow*
+and enter its tag. (You can always attach the files by hand too: edit the release and drop them
+into the *Attach binaries* box.)
 
-`build/test_presenter.exe` runs the real HID++ code against a simulated Spotlight 2 (both over
-Bluetooth and behind a Bolt receiver shared with a mouse): `test_presenter.exe` and
-`test_presenter.exe receiver`.
+`build/test_presenter.exe` runs the real HID++ code against a simulated Spotlight 2:
+`test_presenter.exe` (Bluetooth), `test_presenter.exe receiver` (behind a Bolt receiver shared
+with a mouse) and `test_presenter.exe quirky` (a remote that does not flag the hard press as
+divertable, tags its button events differently and drops a command).
 
 ## How it works
 

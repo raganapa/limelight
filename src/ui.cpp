@@ -103,7 +103,7 @@ Theme MakeTheme() {
 }
 
 // ---------------------------------------------------------------- widgets
-enum class W { Header, Section, CardBegin, CardEnd, Segmented, Slider, Toggle, Swatches, Buttons, Text };
+enum class W { Header, Section, CardBegin, CardEnd, Segmented, Slider, Toggle, Swatches, Buttons, Text, Remote };
 
 struct Widget {
   W type = W::Text;
@@ -313,6 +313,15 @@ void Build() {
     w.enabled = [&s] { return s.laserKnown; };
     add(w);
   }
+  {
+    Widget w;
+    w.type = W::Remote;
+    w.label = L"Remote check";
+    w.sub = L"Press the button: these light up";
+    w.options = {L"Light press", L"Hard press", L"Action"};
+    w.enabled = [h] { return h->RemoteConnected(); };
+    add(w);
+  }
   cardEnd();
 
   section(L"Look");
@@ -516,6 +525,24 @@ void Layout(Graphics& g) {
       case W::Toggle:
         w.ctrl = RectF(right - kCardPad - 44, cy - 11, 44, 22);
         break;
+      case W::Remote: {
+        const float pillH = 28, gap = 8;
+        std::vector<float> widths;
+        float total = 0;
+        for (auto& o : w.options) {
+          const float ow = MeasureW(g, L"\u2713 " + o, *font) / K() + 26;
+          widths.push_back(ow);
+          total += ow;
+        }
+        total += gap * float(widths.size() - 1);
+        float x = right - kCardPad - total;
+        w.ctrl = RectF(x, cy - pillH / 2, total, pillH);
+        for (float ow : widths) {
+          w.parts.push_back(RectF(x, cy - pillH / 2, ow, pillH));
+          x += ow + gap;
+        }
+        break;
+      }
       case W::Swatches: {
         const float d = 26, gap = 10;
         const float total = w.colors.size() * d + (w.colors.size() - 1) * gap;
@@ -606,7 +633,8 @@ void Paint(HDC dc) {
     StrokeRound(g, r, 8 * k, t.cardBorder, 1.f);
     // separators between rows
     auto isRow = [](W t) {
-      return t == W::Segmented || t == W::Slider || t == W::Toggle || t == W::Swatches;
+      return t == W::Segmented || t == W::Slider || t == W::Toggle || t == W::Swatches ||
+             t == W::Remote;
     };
     for (size_t m = i + 1; m + 1 < j; ++m) {
       const float sy = u.ws[m].y + u.ws[m].h;
@@ -658,7 +686,8 @@ void Paint(HDC dc) {
       case W::Segmented:
       case W::Slider:
       case W::Toggle:
-      case W::Swatches: {
+      case W::Swatches:
+      case W::Remote: {
         if (!w.sub.empty()) {
           Text(g, w.label, *fBody, Px(RectF(left + kCardPad, w.y + 8, 300, 22)), textC);
           Text(g, w.sub, *fSmall, Px(RectF(left + kCardPad, w.y + 29, 300, 18)), t.sub);
@@ -749,6 +778,25 @@ void Paint(HDC dc) {
         g.FillEllipse(&b, pr);
         Pen edge(Color(60, 0, 0, 0), 1.f);
         g.DrawEllipse(&edge, pr);
+      }
+    } else if (w.type == W::Remote) {
+      // Live view of what the app receives from the remote: lit while pressed,
+      // a tick once it has been seen.
+      const LPARAM now = u.host->RemoteButtons(), seen = u.host->RemoteSeen();
+      for (size_t p = 0; p < w.parts.size(); ++p) {
+        RectF pr = Px(w.parts[p]);
+        const LPARAM bit = LPARAM(1) << p;
+        const bool lit = en && (now & bit);
+        const bool was = en && (seen & bit);
+        if (lit) {
+          FillRound(g, pr, pr.Height / 2, t.accent);
+        } else {
+          FillRound(g, pr, pr.Height / 2, t.dark ? Rgb(0x1F1F1F) : Rgb(0xEDEDED));
+          StrokeRound(g, pr, pr.Height / 2, t.cardBorder, 1.f);
+        }
+        const std::wstring label = (was ? L"\u2713 " : L"") + w.options[p];
+        Text(g, label, *fCtl, pr, lit ? t.accentText : (was ? t.text : t.sub),
+             StringAlignmentCenter);
       }
     } else if (w.type == W::Buttons) {
       for (size_t p = 0; p < w.parts.size(); ++p) {
@@ -1151,6 +1199,10 @@ void RefreshSettingsWindow() {
   Relayout();
   g_ui->scroll = g_ui->scrollTarget = Clamp(keep, 0.f, MaxScroll());
   InvalidateRect(g_ui->hwnd, nullptr, FALSE);
+}
+
+void RepaintSettingsWindow() {
+  if (g_ui) InvalidateRect(g_ui->hwnd, nullptr, FALSE);
 }
 
 void CloseSettingsWindow() {

@@ -86,9 +86,11 @@ void Presenter::OnNotify(const uint8_t* r, size_t n) {
   const bool rx = viaReceiver_.load();
   if (r[0] == kLong) {
     if (rx && r[1] != devIdx_.load()) return;
-    const uint8_t feat = r[2], fnsw = r[3];
-    if ((fnsw & 0x0F) != 0) return;  // a reply to some request, not an event
-    const uint8_t fn = fnsw >> 4;
+    const uint8_t feat = r[2], fn = uint8_t(r[3] >> 4);
+    if (feat == 0xFF) return;  // an error report for some request
+    // Button events normally carry software ID 0, but the check is deliberately left
+    // out (as in foco and Projecteur): a remote that tags its events differently would
+    // otherwise look completely dead. Replies to our own requests never get here.
     const uint8_t ir = idxReprog_.load();
     if (ir && feat == ir && fn == 0 && n >= 12) {
       LPARAM mask = 0;
@@ -98,20 +100,37 @@ void Presenter::OnNotify(const uint8_t* r, size_t n) {
         else if (cid == CID_HIGHLIGHT_HARD) mask |= BTN_HARD;
         else if (cid == CID_ACTION) mask |= BTN_ACTION;
       }
-      if (buttons_.exchange(mask) != mask) Post(PE_BUTTONS, mask);
+      if ((mask & BTN_SOFT) && !(buttons_.load() & BTN_SOFT)) pressedSinceVerify_ = true;
+      if (buttons_.exchange(mask) != mask) {
+        Log("presenter: buttons %s%s%s%s (%02X %02X %02X %02X %02X %02X)",
+            (mask & BTN_SOFT) ? "light " : "", (mask & BTN_HARD) ? "hard " : "",
+            (mask & BTN_ACTION) ? "action " : "", mask ? "" : "released", r[3], r[4], r[5],
+            r[6], r[7], r[8]);
+        Post(PE_BUTTONS, mask);
+      }
       return;
     }
+    if (ir && feat == ir) return;  // raw motion and the like
     const uint8_t iw = idxWireless_.load();
-    if (iw && feat == iw) {  // the device announces it (re)connected: it forgot our setup
+    if (iw && feat == iw && fn == 0) {  // the device (re)connected: it forgot our setup
       Log("presenter: wireless status event -> reconfigure");
       Reconfigure();
       return;
     }
     const uint8_t ib = idxBattery_.load();
-    if (ib && feat == ib && fn == 0) {
+    if (ib && feat == ib && fn == 0 && (r[3] & 0x0F) != kSwId) {
       battery_ = r[4];
       charging_ = unifiedBattery_.load() ? (r[6] == 1 || r[6] == 2) : (r[6] == 1 || r[6] == 4);
       Post(PE_BATTERY, r[4] | (charging_ ? 0x100 : 0));
+      return;
+    }
+    // Anything else (not a late reply of ours) is logged a few times: if a remote reports
+    // its buttons some other way, this is where it shows up.
+    if ((r[3] & 0x0F) != kSwId && otherMessages_.fetch_add(1) < 40) {
+      char hex[64] = {};
+      for (size_t i = 0; i < std::min<size_t>(n, 12); ++i)
+        snprintf(hex + i * 3, sizeof hex - i * 3, "%02X ", r[i]);
+      Log("presenter: other HID++ message: %s", hex);
     }
   } else if (r[0] == kShort && rx && n >= 7) {
     if (r[2] == 0x41) {  // receiver: device connection notification
@@ -202,6 +221,13 @@ void Presenter::Run() {
       const uint8_t ih = idxHaptic_.load();
       if (ih) dev_->Send(ih, 4, {wf});
     }
+    if (retryAt_ && NowMs() >= retryAt_) {
+      Log("presenter: retrying the button setup");
+      ApplyConfig(false);
+    }
+    // Checked only right after a press, when the remote is awake anyway: polling a
+    // sleeping remote would keep its radio busy and drain the battery.
+    if (pressedSinceVerify_.exchange(false) && NowMs() >= nextVerify_) VerifyDiversion();
     if (now - lastBattery_ > 5 * 60 * 1000) ReadBattery();
   }
   if (dev_) {
@@ -304,7 +330,12 @@ void Presenter::Disconnect() {
   dev_.reset();
   controls_.clear();
   diverted_.clear();
+  unsupported_.clear();
   laserApplied_ = false;
+  retryAt_ = 0;
+  retryRounds_ = 0;
+  readBackUnreliable_ = false;
+  needSetup_ = false;
   idxReprog_ = idxHaptic_ = idxBattery_ = idxWireless_ = 0;
   buttons_ = 0;
   transport_ = 0;
@@ -312,6 +343,16 @@ void Presenter::Disconnect() {
   hasHaptics_ = false;
   hasAction_ = false;
   if (connected_.exchange(false)) Post(PE_DISCONNECTED, 0);
+}
+
+// setCidReporting flags: divert (bit 0) with its "valid" bit (bit 1). The highlight
+// button's two levels also get "raw XY valid, raw XY off" (0x20): exactly the 0x23 that is
+// known to work on a real Spotlight 2, and it keeps the gyro moving the pointer.
+uint8_t Presenter::DivertFlags(uint16_t cid, bool on) const {
+  bool raw = cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD;
+  for (auto& k : controls_)
+    if (k.cid == cid && (k.flags & KF_RAW_XY)) raw = true;
+  return uint8_t((on ? 0x03 : 0x02) | (raw ? 0x20 : 0x00));
 }
 
 void Presenter::ApplyConfig(bool deviceForgot) {
@@ -331,21 +372,18 @@ void Presenter::ApplyConfig(bool deviceForgot) {
       if (k.cid == cid) return &k;
     return nullptr;
   };
-  auto rawValid = [&](uint16_t cid) -> uint8_t {
-    const Control* k = find(cid);
-    // Explicitly keep raw XY off (with its "valid" bit) where the control supports it,
-    // otherwise the gyro would stop moving the pointer while the button is held.
-    return (k && (k->flags & KF_RAW_XY)) ? 0x20 : 0x00;
-  };
   const bool laser = c.laserOn && c.laserSrc;
   std::set<uint16_t> want;
-  auto consider = [&](bool on, uint16_t cid) {
-    const Control* k = find(cid);
-    if (on && k && (k->flags & KF_DIVERTABLE) && !(laser && c.laserSrc == cid)) want.insert(cid);
-  };
-  consider(c.divertSoft, CID_HIGHLIGHT_SOFT);
-  consider(c.divertHard, CID_HIGHLIGHT_HARD);
-  consider(c.divertAction, CID_ACTION);
+  // Both levels of the highlight button are always diverted, even when the remote's
+  // control list came back incomplete or did not mark them divertable: the commands are
+  // known to work, and a missing hard press is far worse than one extra command.
+  if (c.divertSoft && !(laser && c.laserSrc == CID_HIGHLIGHT_SOFT)) want.insert(CID_HIGHLIGHT_SOFT);
+  if (c.divertHard && !(laser && c.laserSrc == CID_HIGHLIGHT_HARD)) want.insert(CID_HIGHLIGHT_HARD);
+  if (c.divertAction && !(laser && c.laserSrc == CID_ACTION)) {
+    const Control* k = find(CID_ACTION);
+    if (k && (k->flags & KF_DIVERTABLE)) want.insert(CID_ACTION);
+  }
+  for (uint16_t cid : unsupported_) want.erase(cid);
 
   // 1) Undo a laser remap that is no longer wanted (before re-diverting that control).
   if (laserApplied_ && (!laser || !c.laserDst || laserAppliedSrc_ != c.laserSrc)) {
@@ -353,26 +391,64 @@ void Presenter::ApplyConfig(bool deviceForgot) {
     Log("presenter: laser remap undone: %s", r.Describe().c_str());
     laserApplied_ = false;
   }
-  // 2) Diversions.
-  for (uint16_t cid : diverted_)
-    if (!want.count(cid)) {
-      Reply r = dev_->SetCidReporting(cid, uint8_t(0x02 | rawValid(cid)), 0);
-      Log("presenter: release %04X -> %s", cid, r.Describe().c_str());
+  // 2) Release what is no longer wanted.
+  for (auto it = diverted_.begin(); it != diverted_.end();) {
+    if (want.count(*it)) {
+      ++it;
+      continue;
     }
-  for (uint16_t cid : want)
-    if (!diverted_.count(cid)) {
-      Reply r = dev_->SetCidReporting(cid, uint8_t(0x03 | rawValid(cid)), 0);
-      Log("presenter: divert %04X -> %s", cid, r.Describe().c_str());
-      if (!r.ok) {  // one retry: the device sometimes drops commands
-        Sleep(60);
-        r = dev_->SetCidReporting(cid, uint8_t(0x03 | rawValid(cid)), 0);
-        Log("presenter: divert %04X retry -> %s", cid, r.Describe().c_str());
+    Reply r = dev_->SetCidReporting(*it, DivertFlags(*it, false), 0);
+    Log("presenter: release %04X -> %s", *it, r.Describe().c_str());
+    it = diverted_.erase(it);
+  }
+  // 3) Divert. A command the remote drops (no answer) is retried; only confirmed ones
+  //    are remembered, so anything that failed is tried again a little later.
+  bool missing = false;
+  for (uint16_t cid : want) {
+    if (diverted_.count(cid)) continue;
+    uint8_t flags = DivertFlags(cid, true);
+    Reply r;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      if (attempt) Sleep(DWORD(90 * attempt));
+      r = dev_->SetCidReporting(cid, flags, 0);
+      if (r.ok) break;
+      Log("presenter: divert %04X (%s) flags %02X -> %s", cid, ControlName(cid), flags,
+          r.Describe().c_str());
+      if (r.error == 2 && (flags & 0x20)) {
+        flags = uint8_t(flags & ~0x20);  // maybe it has no raw XY: try without that bit
+        continue;
       }
+      if (r.error && r.error != 8) break;  // a definite "no" (8 = busy: try again)
     }
-  diverted_ = want;
-  // 3) Laser remap.
+    if (!r.ok) {
+      if (r.error && r.error != 8) {
+        unsupported_.insert(cid);
+        Log("presenter: the remote refuses %04X (%s); not asking again", cid, ControlName(cid));
+      } else {
+        missing = true;
+      }
+      continue;
+    }
+    diverted_.insert(cid);
+    Reply g = dev_->GetCidReporting(cid);
+    const bool kept = g.ok && (g.d[2] & 0x01);
+    if (g.ok && !kept) readBackUnreliable_ = true;
+    Log("presenter: divert %04X (%s) flags %02X -> ok%s", cid, ControlName(cid), flags,
+        !g.ok ? "" : kept ? ", confirmed" : ", but reading it back says otherwise");
+  }
+  if (missing) {
+    ++retryRounds_;
+    retryAt_ = retryRounds_ <= 5 ? NowMs() + 2500 : 0;  // after that: on the next press
+    needSetup_ = true;
+  } else {
+    retryRounds_ = 0;
+    retryAt_ = 0;
+    needSetup_ = false;
+  }
+  nextVerify_ = NowMs() + 15000;
+  // 4) Laser remap.
   if (laser && c.laserDst && !laserApplied_) {
-    Reply r = dev_->SetCidReporting(c.laserSrc, uint8_t(0x02 | rawValid(c.laserSrc)), c.laserDst);
+    Reply r = dev_->SetCidReporting(c.laserSrc, uint8_t(DivertFlags(c.laserSrc, false)), c.laserDst);
     Log("presenter: laser remap %04X -> %04X: %s", c.laserSrc, c.laserDst, r.Describe().c_str());
     laserApplied_ = r.ok;
     laserAppliedSrc_ = c.laserSrc;
@@ -387,14 +463,32 @@ void Presenter::ApplyConfig(bool deviceForgot) {
   }
 }
 
+// After a light press (at most every 15 s), check that the remote still reports both
+// levels of the highlight button to us. It forgets after sleeping, and another app
+// (Logi Options+) may change it behind our back.
+void Presenter::VerifyDiversion() {
+  nextVerify_ = NowMs() + 15000;
+  if (!dev_) return;
+  if (needSetup_) {
+    Log("presenter: finishing the button setup");
+    ApplyConfig(false);
+    return;
+  }
+  if (readBackUnreliable_) return;
+  for (uint16_t cid : {CID_HIGHLIGHT_HARD, CID_HIGHLIGHT_SOFT}) {
+    if (!diverted_.count(cid)) continue;
+    Reply g = dev_->GetCidReporting(cid);
+    if (g.ok && !(g.d[2] & 0x01)) {
+      Log("presenter: %04X is no longer reported to us -> setting the buttons up again", cid);
+      ApplyConfig(true);
+      return;
+    }
+  }
+}
+
 void Presenter::RestoreDevice() {
   if (!dev_) return;
-  for (uint16_t cid : diverted_) {
-    uint8_t rv = 0;
-    for (auto& k : controls_)
-      if (k.cid == cid && (k.flags & KF_RAW_XY)) rv = 0x20;
-    dev_->SetCidReporting(cid, uint8_t(0x02 | rv), 0);
-  }
+  for (uint16_t cid : diverted_) dev_->SetCidReporting(cid, DivertFlags(cid, false), 0);
   diverted_.clear();
   if (laserApplied_) dev_->SetCidReporting(laserAppliedSrc_, 0x00, laserAppliedSrc_);
   laserApplied_ = false;

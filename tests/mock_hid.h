@@ -17,4 +17,6 @@ void PressButtons(std::initializer_list<uint16_t> cids);
 void ForgetSetup();
 void AnnounceReconnect();
 void SetReceiverMode(bool on);
+void SetQuirky(bool on);
+int DeliberateDrops();
 }  // namespace mock

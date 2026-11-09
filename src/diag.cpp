@@ -107,11 +107,22 @@ void Undo() {
   g_remapped.clear();
 }
 
+std::atomic<int> g_seen{0};  // 1 = light press, 2 = hard press seen during Watch
+
 void OnEvent(const uint8_t* r, size_t n) {
-  if (n < 4 || r[0] != kLong || (r[3] & 0x0F) != 0) return;
-  const uint8_t idx = g_reprogIdx.load();
+  if (n < 4) return;
   const double t = (NowMs() - g_t0) / 1000.0;
+  if (r[0] != kLong) {  // e.g. a receiver notification
+    Out("  [%7.3f s] message: %s\n", t, Hex(r, std::min<size_t>(n, 7)).c_str());
+    return;
+  }
+  const uint8_t idx = g_reprogIdx.load();
   if (idx && r[2] == idx && (r[3] >> 4) == 0) {
+    for (int i = 0; i < 4; ++i) {
+      const uint16_t cid = uint16_t((r[4 + 2 * i] << 8) | r[5 + 2 * i]);
+      if (cid == CID_HIGHLIGHT_SOFT) g_seen |= 1;
+      if (cid == CID_HIGHLIGHT_HARD) g_seen |= 2;
+    }
     std::string pressed;
     for (int i = 0; i < 4; ++i) {
       const uint16_t cid = uint16_t((r[4 + 2 * i] << 8) | r[5 + 2 * i]);
@@ -120,7 +131,8 @@ void OnEvent(const uint8_t* r, size_t n) {
       snprintf(b, sizeof b, "%s%04X %s", pressed.empty() ? "" : " + ", cid, ControlName(cid));
       pressed += b;
     }
-    Out("  [%7.3f s] %s\n", t, pressed.empty() ? "(all released)" : pressed.c_str());
+    Out("  [%7.3f s] %s   [%s]\n", t, pressed.empty() ? "(all released)" : pressed.c_str(),
+        Hex(r, 12).c_str());
     return;
   }
   if (idx && r[2] == idx && (r[3] >> 4) == 1) {
@@ -128,7 +140,7 @@ void OnEvent(const uint8_t* r, size_t n) {
     Out("  [%7.3f s] raw motion dx=%d dy=%d\n", t, dx, dy);
     return;
   }
-  Out("  [%7.3f s] event: %s\n", t, Hex(r, std::min<size_t>(n, 12)).c_str());
+  Out("  [%7.3f s] message: %s\n", t, Hex(r, std::min<size_t>(n, 12)).c_str());
 }
 
 BOOL WINAPI CtrlHandler(DWORD) {
@@ -283,22 +295,38 @@ void Report() {
 void Watch() {
   if (g_controls.empty()) g_controls = g_dev->ReadControls(true);
   Out("\nSetting the buttons to report here (temporarily)...\n");
-  for (auto& k : g_controls) {
-    if (!(k.flags & KF_DIVERTABLE) || (k.flags & KF_VIRTUAL)) continue;
-    Reply r = g_dev->SetCidReporting(k.cid, uint8_t(0x03 | RawValid(k.cid)), 0);
-    Out("  %04X %-32s %s\n", k.cid, ControlName(k.cid), r.Describe().c_str());
-    if (r.ok) g_diverted.insert(k.cid);
+  std::vector<uint16_t> cids = {CID_HIGHLIGHT_SOFT, CID_HIGHLIGHT_HARD};  // always, like the app
+  for (auto& k : g_controls)
+    if ((k.flags & KF_DIVERTABLE) && !(k.flags & KF_VIRTUAL) &&
+        std::find(cids.begin(), cids.end(), k.cid) == cids.end())
+      cids.push_back(k.cid);
+  for (uint16_t cid : cids) {
+    const bool level = cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD;
+    const uint8_t flags = uint8_t(0x03 | (level ? 0x20 : RawValid(cid)));
+    Reply r = g_dev->SetCidReporting(cid, flags, 0);
+    std::string back;
+    if (r.ok) {
+      g_diverted.insert(cid);
+      Reply g = g_dev->GetCidReporting(cid);
+      back = !g.ok ? "" : (g.d[2] & 1) ? ", confirmed" : ", NOT kept by the remote";
+    }
+    Out("  %04X %-32s flags %02X: %s%s\n", cid, ControlName(cid), flags, r.Describe().c_str(),
+        back.c_str());
     Sleep(40);
   }
-  Out("\nNow press every button: light press, hard press, Next, Back, the action button,\n"
+  Out("\nNow press: lightly, then HARD, then let go. Then Next, Back, the action button,\n"
       "and long presses. (Slides will not change while this runs.)\n"
       "Press Enter here when you are done.\n\n");
+  g_seen = 0;
   g_t0 = NowMs();
   char line[64];
   fgets(line, sizeof line, stdin);
+  Out("\nSummary: light press %s, hard press %s.\n", (g_seen & 1) ? "SEEN" : "not seen",
+      (g_seen & 2) ? "SEEN" : "not seen");
   Out("Restoring the buttons...\n");
   for (uint16_t cid : g_diverted) {
-    g_dev->SetCidReporting(cid, uint8_t(0x02 | RawValid(cid)), 0);
+    const bool level = cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD;
+    g_dev->SetCidReporting(cid, uint8_t(0x02 | (level ? 0x20 : RawValid(cid))), 0);
     Sleep(40);
   }
   g_diverted.clear();

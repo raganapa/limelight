@@ -56,6 +56,8 @@ class Presenter {
   void Disconnect();
   void ApplyConfig(bool deviceForgot);
   void RestoreDevice();
+  void VerifyDiversion();
+  uint8_t DivertFlags(uint16_t cid, bool on) const;
   void ReadBattery();
   void OnNotify(const uint8_t* r, size_t n);
   void OnGone();
@@ -77,9 +79,14 @@ class Presenter {
   std::unique_ptr<hidpp::Device> dev_;
   std::vector<hidpp::Control> controls_;
   std::set<uint16_t> diverted_;
+  std::set<uint16_t> unsupported_;  // controls the remote said it does not have
   bool laserApplied_ = false;
   uint16_t laserAppliedSrc_ = 0;
   double lastAttempt_ = -1e9, lastBattery_ = 0, lastReconfigure_ = 0;
+  double retryAt_ = 0, nextVerify_ = 0;
+  int retryRounds_ = 0;
+  bool readBackUnreliable_ = false;
+  bool needSetup_ = false;  // some button could not be set up yet
   int failedAttempts_ = 0;
 
   // read from reader threads
@@ -87,6 +94,8 @@ class Presenter {
       idxWireless_{0};
   std::atomic<bool> viaReceiver_{false}, unifiedBattery_{true};
   std::atomic<LPARAM> buttons_{0};
+  std::atomic<int> otherMessages_{0};
+  std::atomic<bool> pressedSinceVerify_{false};
 
   // status
   std::atomic<bool> connected_{false}, charging_{false}, hasHaptics_{false}, hasAction_{false},

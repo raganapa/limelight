@@ -117,6 +117,9 @@ class App : public UiHost {
   void OpenDiagnostics() override;
   bool HasHaptics() override { return presenter_.HasHaptics(); }
   bool HasActionButton() override { return presenter_.HasActionButton(); }
+  LPARAM RemoteButtons() override { return buttons_; }
+  LPARAM RemoteSeen() override { return seen_; }
+  bool RemoteConnected() override { return presenter_.Connected(); }
   bool Autostart() override { return AutostartEnabled(); }
   void SetAutostartPref(bool on) override { SetAutostart(on); }
 
@@ -155,7 +158,7 @@ class App : public UiHost {
   Presenter presenter_;
 
   LPARAM buttons_ = 0;
-  bool hidppSeen_ = false;
+  LPARAM seen_ = 0;  // buttons seen since start (for the remote check in Settings)
   double lastButtonChange_ = -1e9;
   Effect latched_ = Effect::None;
   Effect previewEffect_ = Effect::None;
@@ -452,7 +455,8 @@ void App::Latch(Effect e) {
 void App::OnButtons(LPARAM mask) {
   const LPARAM old = buttons_;
   buttons_ = mask;
-  hidppSeen_ = true;
+  seen_ |= mask;
+  RepaintSettingsWindow();
   lastButtonChange_ = NowMs();
   motionUntil_ = 0;
   const bool hardDown = (mask & BTN_HARD) && !(old & BTN_HARD);
