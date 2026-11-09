@@ -6,7 +6,7 @@ Target amd64-unicode
 !include "MUI2.nsh"
 
 !define APPNAME "Limelight"
-!define VERSION "1.0.2"
+!define VERSION "1.0.3"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Limelight"
 !define RUNKEY "Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -17,7 +17,7 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 BrandingText "Limelight ${VERSION}"
 
-VIProductVersion "1.0.2.0"
+VIProductVersion "1.0.3.0"
 VIAddVersionKey "ProductName" "Limelight"
 VIAddVersionKey "FileDescription" "Limelight setup"
 VIAddVersionKey "FileVersion" "${VERSION}"

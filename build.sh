@@ -30,6 +30,10 @@ if [ "${1:-}" = "test" ]; then
     src/presenter.cpp src/hidpp.cpp src/hid_key.cpp src/log.cpp -o build/test_presenter.exe \
     -static -lole32 -lshell32 -luser32 -luuid
   echo "built build/test_presenter.exe"
+  "$CXX" -std=c++17 -O1 -DUNICODE -D_UNICODE -DLIMELIGHT_DIAG_TEST tests/test_diag.cpp \
+    tests/mock_hid.cpp src/diag.cpp src/hidpp.cpp src/hid_key.cpp src/log.cpp src/settings.cpp \
+    -o build/test_diag.exe -static -lole32 -lshell32 -luser32 -luuid -ladvapi32
+  echo "built build/test_diag.exe"
 fi
 
 if command -v makensis >/dev/null; then

@@ -297,8 +297,8 @@ void Build() {
     w.type = W::Segmented;
     w.label = L"Hard press force";
     w.sub = L"How firmly you press for it";
-    w.options = {L"Soft", L"Medium", L"Firm"};
-    w.get = [&s] { return Clamp(s.pressure, 0, 2); };
+    w.options = {L"Lightest", L"Soft", L"Medium", L"Firm"};
+    w.get = [&s] { return Clamp(s.pressure, 0, 3); };
     w.set = [&s, h](int i) { s.pressure = i; h->PrefsChanged(); };
     w.enabled = [h] { return h->HasPressure(); };
     add(w);

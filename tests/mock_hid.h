@@ -18,6 +18,10 @@ void PressButtons(std::initializer_list<uint16_t> cids);
 // press only if it is set up to and the force reaches its force-sensing threshold.
 void Press(int force);
 int ForceValue();         // the remote's current force-sensing threshold
+void SetHardAs(uint16_t cid);  // the remote reports the hard press as this control
+// Start with this force value; with needsDefault the hard press only fires once the value
+// is at most the remote's default (a remote "stuck" on a value that is too firm).
+void SetForceScenario(uint16_t start, bool needsDefault);
 void ForgetPressure();    // the remote lost its pressure setting (nobody told the host)
 void ForgetHardPress();   // the remote stopped reporting the hard press (nobody told the host)
 void ForgetSetup();

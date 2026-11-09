@@ -98,8 +98,9 @@ void Presenter::OnNotify(const uint8_t* r, size_t n) {
       LPARAM mask = 0;
       for (int i = 0; i < 4; ++i) {
         const uint16_t cid = uint16_t((r[4 + 2 * i] << 8) | r[5 + 2 * i]);
+        const uint16_t alt = hardCid_.load();
         if (cid == CID_HIGHLIGHT_SOFT) mask |= BTN_SOFT;
-        else if (cid == CID_HIGHLIGHT_HARD) mask |= BTN_HARD;
+        else if (cid == CID_HIGHLIGHT_HARD || (alt && cid == alt)) mask |= BTN_HARD;
         else if (cid == CID_ACTION) mask |= BTN_ACTION;
       }
       const LPARAM prev = buttons_.exchange(mask);
@@ -398,6 +399,10 @@ void Presenter::ApplyConfig(bool deviceForgot) {
   // known to work, and a missing hard press is far worse than one extra command.
   if (c.divertSoft && !(laser && c.laserSrc == CID_HIGHLIGHT_SOFT)) want.insert(CID_HIGHLIGHT_SOFT);
   if (c.divertHard && !(laser && c.laserSrc == CID_HIGHLIGHT_HARD)) want.insert(CID_HIGHLIGHT_HARD);
+  // On some remotes the hard press arrives as another control (found by the hard press
+  // finder in diagnostics).
+  hardCid_ = c.hardCid;
+  if (c.divertHard && c.hardCid && !(laser && c.laserSrc == c.hardCid)) want.insert(c.hardCid);
   if (c.divertAction && !(laser && c.laserSrc == CID_ACTION)) {
     const Control* k = find(CID_ACTION);
     if (k && (k->flags & KF_DIVERTABLE)) want.insert(CID_ACTION);
@@ -443,7 +448,8 @@ void Presenter::ApplyConfig(bool deviceForgot) {
       // The two levels of the highlight button exist on every Spotlight 2, so a "no"
       // for them is taken as "not now" (e.g. the remote is still waking up) and they
       // are asked for again later. Anything else that is refused is left alone.
-      const bool level = cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD;
+      const bool level =
+          cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD || cid == c.hardCid;
       if (r.error && r.error != 8 && !level) {
         unsupported_.insert(cid);
         Log("presenter: the remote refuses %04X (%s); not asking again", cid, ControlName(cid));
@@ -492,6 +498,7 @@ void Presenter::ApplyConfig(bool deviceForgot) {
   //    lost it: without a usable value the hard press may never fire, even though the
   //    button itself is set up.
   ApplyPressure(c.pressure, deviceForgot || pressureApplied_ != c.pressure);
+  pressureApplied_ = c.pressure;
 
   const uint8_t ih = idxHaptic_.load();
   if (ih) {
@@ -521,23 +528,28 @@ void Presenter::QuickCheck() {
     c = cfg_;
   }
   CheckPressure(c.pressure);
-  if (!diverted_.count(CID_HIGHLIGHT_HARD) || (buttons_.load() & BTN_HARD)) return;
-  const uint8_t flags = DivertFlags(CID_HIGHLIGHT_HARD, true);
-  if (readBackUnreliable_) {
-    // This remote does not tell us the truth when asked, so just say it again.
-    Reply r = dev_->SetCidReporting(CID_HIGHLIGHT_HARD, flags, 0);
-    if (checkLogs_ < 3) {
-      ++checkLogs_;
-      Log("presenter: hard press set up again (as a precaution): %s", r.Describe().c_str());
+  if (buttons_.load() & BTN_HARD) return;
+  bool forgot = false;
+  for (uint16_t cid : {uint16_t(CID_HIGHLIGHT_HARD), c.hardCid}) {
+    if (!cid || !diverted_.count(cid)) continue;
+    const uint8_t flags = DivertFlags(cid, true);
+    if (readBackUnreliable_) {
+      // This remote does not tell us the truth when asked, so just say it again.
+      Reply r = dev_->SetCidReporting(cid, flags, 0);
+      if (checkLogs_ < 3) {
+        ++checkLogs_;
+        Log("presenter: %04X set up again (as a precaution): %s", cid, r.Describe().c_str());
+      }
+      continue;
     }
-    return;
+    Reply g = dev_->GetCidReporting(cid);
+    if (!g.ok || (g.d[2] & 0x01)) continue;
+    Reply r = dev_->SetCidReporting(cid, flags, 0);
+    Log("presenter: the remote had forgotten %04X (hard press); set up again: %s", cid,
+        r.Describe().c_str());
+    forgot = true;
   }
-  Reply g = dev_->GetCidReporting(CID_HIGHLIGHT_HARD);
-  if (!g.ok || (g.d[2] & 0x01)) return;
-  Reply r = dev_->SetCidReporting(CID_HIGHLIGHT_HARD, flags, 0);
-  Log("presenter: the remote had forgotten the hard press; set up again: %s",
-      r.Describe().c_str());
-  if (c.divertAction && diverted_.count(CID_ACTION)) {
+  if (forgot && c.divertAction && diverted_.count(CID_ACTION)) {
     Reply a = dev_->GetCidReporting(CID_ACTION);
     if (a.ok && !(a.d[2] & 0x01))
       dev_->SetCidReporting(CID_ACTION, DivertFlags(CID_ACTION, true), 0);
@@ -586,17 +598,41 @@ void Presenter::ReadForceButtons() {
   }
 }
 
-void Presenter::ApplyPressure(int preset, bool always) {
+// The force sensing "set" is sent in the same layout as "get" answers (after the button
+// number), with the first value replaced: the Spotlight 2 refuses a set that leaves the
+// rest of it zero.
+Reply Presenter::WriteForce(ForceButton& f, uint16_t value, const Reply* fresh) {
+  const uint8_t fi = idxForce_.load();
+  Reply cur = fresh ? *fresh : dev_->Call(fi, 2, {f.index});
+  uint8_t p[16];
+  if (cur.ok) {
+    ForceSetParams(f.index, cur.d, value, p);
+  } else {
+    memset(p, 0, sizeof p);
+    p[0] = f.index;
+    p[1] = uint8_t(value >> 8);
+    p[2] = uint8_t(value & 0xFF);
+  }
+  Reply r = dev_->CallBuf(fi, 3, p, sizeof p, 450);
+  if (!r.ok && cur.ok) {
+    // Fall back to the short form (button, value) that other Logitech devices use.
+    memset(p + 3, 0, sizeof p - 3);
+    Reply r2 = dev_->CallBuf(fi, 3, p, sizeof p, 450);
+    if (r2.ok) r = r2;
+  }
+  return r;
+}
+
+void Presenter::ApplyPressure(int level, bool always) {
   const uint8_t fi = idxForce_.load();
   if (!dev_ || !fi) return;
   for (auto& f : force_) {
     if (!f.changeable) continue;
-    const uint16_t target = PressureTarget(f.def, f.min, f.max, preset);
+    const uint16_t target = PressureTarget(f.def, f.min, f.max, level);
     if (!always && f.curOk && f.cur == target) continue;
     const uint16_t before = f.cur;
     const bool beforeOk = f.curOk;
-    const uint8_t p[3] = {f.index, uint8_t(target >> 8), uint8_t(target & 0xFF)};
-    Reply r = dev_->CallBuf(fi, 3, p, sizeof p, 450);
+    Reply r = WriteForce(f, target, nullptr);
     Reply g = dev_->Call(fi, 2, {f.index});
     f.curOk = g.ok;
     if (g.ok) f.cur = Be16(g.d);
@@ -607,29 +643,26 @@ void Presenter::ApplyPressure(int preset, bool always) {
     Log("presenter: pressure for force button %u: %s -> %u (%s)%s", f.index, was, target,
         r.Describe().c_str(), g.ok && f.cur != target ? ", but it reads back differently" : "");
   }
-  pressureApplied_ = preset;
 }
 
 // Returns true when the remote had lost the pressure setting and it was sent again.
-bool Presenter::CheckPressure(int preset) {
+bool Presenter::CheckPressure(int level) {
   const uint8_t fi = idxForce_.load();
   if (!dev_ || !fi) return false;
   bool fixed = false;
   for (auto& f : force_) {
-    if (!f.changeable) continue;
+    // Only when setting it ever worked: otherwise every light press would retry in vain.
+    if (!f.changeable || !f.appliedOk) continue;
     Reply g = dev_->Call(fi, 2, {f.index});
     if (!g.ok) continue;
-    const uint16_t cur = Be16(g.d), target = PressureTarget(f.def, f.min, f.max, preset);
-    const uint16_t expected = f.appliedOk ? f.applied : target;
+    const uint16_t cur = Be16(g.d), target = PressureTarget(f.def, f.min, f.max, level);
     const int slack = std::max(1, (f.max - f.min) / 100);  // ignore rounding in the remote
     f.cur = cur;
     f.curOk = true;
-    if (std::abs(int(cur) - int(expected)) <= slack) continue;
-    const uint8_t p[3] = {f.index, uint8_t(target >> 8), uint8_t(target & 0xFF)};
-    Reply r = dev_->CallBuf(fi, 3, p, sizeof p, 450);
+    if (std::abs(int(cur) - int(f.applied)) <= slack) continue;
+    Reply r = WriteForce(f, target, &g);
     if (r.ok) {
       f.cur = target;
-      f.appliedOk = true;
       f.applied = target;
     }
     fixed = true;

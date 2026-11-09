@@ -2,6 +2,7 @@
 #include "diag.h"
 
 #include <cstdarg>
+#include <map>
 #include <set>
 
 #include "hidpp.h"
@@ -16,6 +17,8 @@ FILE* g_report = nullptr;
 std::unique_ptr<Device> g_dev;
 std::set<uint16_t> g_diverted;          // controls we diverted (to undo)
 std::vector<uint16_t> g_remapped;       // controls we remapped (to undo)
+// hard press finder: control -> the two flag bytes that put it back to normal
+std::map<uint16_t, std::pair<uint8_t, uint8_t>> g_findUndo;
 std::vector<Control> g_controls;
 double g_t0 = 0;
 std::wstring g_reportPath;
@@ -99,10 +102,18 @@ std::string Flags(uint16_t f) {
   return s.empty() ? "-" : s;
 }
 
-const char* kPressureNames[] = {"Soft", "Medium", "Firm"};
+const char* kPressureNames[] = {"Lightest", "Soft", "Medium", "Firm"};
 
-// Force sensing (0x19C0): how hard the highlight button must be pressed for each level.
-// apply = set it the way Limelight does (the "Hard press force" choice in Settings).
+// Force sensing (0x19C0): how hard the highlight button must be pressed. Its "set" takes
+// the layout its "get" answers, after the button number (see ForceSetParams).
+Reply ForceWrite(uint8_t fi, uint8_t b, const Reply& cur, uint16_t v) {
+  uint8_t p[16];
+  ForceSetParams(b, cur.d, v, p);
+  return g_dev->CallBuf(fi, 3, p, sizeof p, 450);
+}
+
+// Prints everything about it (raw, so that nothing is lost on a remote we do not know
+// yet). apply = set it the way Limelight does (the "Hard press force" choice in Settings).
 // Returns false if the remote has no adjustable pressure.
 bool Pressure(bool apply) {
   const uint8_t fi = g_dev->FeatureIndex(F_FORCE_BUTTON);
@@ -119,28 +130,31 @@ bool Pressure(bool apply) {
   s.Load();
   s.Sanitize();
   bool any = false;
-  Out("Pressure (force sensing 19C0): %u button(s)\n", n.d[0]);
+  Out("Pressure (force sensing 19C0): %u button(s)   [%s]\n", n.d[0], Hex(n.d, 8).c_str());
   for (int b = 0; b < std::min<int>(n.d[0], 4); ++b) {
     Reply caps = g_dev->Call(fi, 1, {uint8_t(b)});
     Reply cur = g_dev->Call(fi, 2, {uint8_t(b)});
-    if (!caps.ok) {
-      Out("  button %d: capabilities -> %s\n", b, caps.Describe().c_str());
-      continue;
-    }
+    Out("  button %d caps: %s\n", b, caps.ok ? Hex(caps.d, 16).c_str() : caps.Describe().c_str());
+    Out("  button %d now:  %s\n", b, cur.ok ? Hex(cur.d, 16).c_str() : cur.Describe().c_str());
+    if (!caps.ok || !cur.ok) continue;
     const bool changeable = caps.d[1] & 1;
     const uint16_t def = uint16_t((caps.d[2] << 8) | caps.d[3]);
     const uint16_t mx = uint16_t((caps.d[4] << 8) | caps.d[5]);
     const uint16_t mn = uint16_t((caps.d[6] << 8) | caps.d[7]);
-    Out("  button %d: now %s, default %u, range %u..%u%s   [%s]\n", b,
-        cur.ok ? std::to_string((cur.d[0] << 8) | cur.d[1]).c_str() : cur.Describe().c_str(),
-        def, mn, mx, changeable ? "" : ", not changeable", Hex(caps.d, 8).c_str());
+    const uint16_t now = uint16_t((cur.d[0] << 8) | cur.d[1]);
+    Out("  button %d: now %u, default %u, range %u..%u%s\n", b, now, def, mn, mx,
+        changeable ? "" : ", not changeable");
+    // Writing back exactly what was read changes nothing, and shows whether we have the
+    // layout right.
+    Reply echo = ForceWrite(fi, uint8_t(b), cur, now);
+    Out("  button %d: writing back the same value: %s\n", b, echo.Describe().c_str());
+    Sleep(40);
     const bool sane = changeable && mx > mn && def >= mn && def <= mx;
     if (!sane) continue;
     any = true;
     if (!apply) continue;
     const uint16_t t = PressureTarget(def, mn, mx, s.pressure);
-    const uint8_t p[3] = {uint8_t(b), uint8_t(t >> 8), uint8_t(t & 0xFF)};
-    Reply w = g_dev->CallBuf(fi, 3, p, sizeof p, 450);
+    Reply w = ForceWrite(fi, uint8_t(b), cur, t);
     Reply g = g_dev->Call(fi, 2, {uint8_t(b)});
     Out("  button %d set to %u (%s, as in Settings): %s, reads back %s\n", b, t,
         kPressureNames[s.pressure], w.Describe().c_str(),
@@ -156,9 +170,27 @@ void Undo() {
   g_diverted.clear();
   for (uint16_t cid : g_remapped) g_dev->SetCidReporting(cid, 0x00, cid);
   g_remapped.clear();
+  for (auto& u : g_findUndo) {
+    const uint16_t cid = u.first;
+    uint8_t p[6] = {uint8_t(cid >> 8), uint8_t(cid & 0xFF), u.second.first, 0, 0, u.second.second};
+    g_dev->CallDev(g_dev->devIdx, g_reprogIdx.load(), 3, p, u.second.second ? 6 : 5, 450, p, 2);
+  }
+  g_findUndo.clear();
 }
 
 std::atomic<int> g_seen{0};  // 1 = light press, 2 = hard press seen during Watch
+
+// What the remote reported while the hard press finder listened.
+struct Rec {
+  bool light = false, hard = false;
+  bool lightDown = false;       // the highlight button is being held
+  std::set<uint16_t> during;    // other controls reported while it was held
+  std::set<uint16_t> all;       // every control reported
+  int raw = 0, other = 0;
+};
+std::mutex g_recM;
+Rec g_rec;
+std::atomic<bool> g_recording{false};
 
 void OnEvent(const uint8_t* r, size_t n) {
   if (n < 4) return;
@@ -169,10 +201,32 @@ void OnEvent(const uint8_t* r, size_t n) {
   }
   const uint8_t idx = g_reprogIdx.load();
   if (idx && r[2] == idx && (r[3] >> 4) == 0) {
+    bool any = false;
     for (int i = 0; i < 4; ++i) {
       const uint16_t cid = uint16_t((r[4 + 2 * i] << 8) | r[5 + 2 * i]);
       if (cid == CID_HIGHLIGHT_SOFT) g_seen |= 1;
       if (cid == CID_HIGHLIGHT_HARD) g_seen |= 2;
+      if (cid) any = true;
+    }
+    if (g_recording) {
+      std::lock_guard<std::mutex> lk(g_recM);
+      bool soft = false;
+      for (int i = 0; i < 4; ++i) {
+        const uint16_t cid = uint16_t((r[4 + 2 * i] << 8) | r[5 + 2 * i]);
+        if (!cid) continue;
+        g_rec.all.insert(cid);
+        if (cid == CID_HIGHLIGHT_SOFT) soft = g_rec.light = true;
+        if (cid == CID_HIGHLIGHT_HARD) g_rec.hard = true;
+      }
+      // Pressing harder may replace the light press in the list, so anything that shows
+      // up between a light press and letting go counts.
+      if (soft) g_rec.lightDown = true;
+      if (g_rec.lightDown)
+        for (int i = 0; i < 4; ++i) {
+          const uint16_t cid = uint16_t((r[4 + 2 * i] << 8) | r[5 + 2 * i]);
+          if (cid && cid != CID_HIGHLIGHT_SOFT) g_rec.during.insert(cid);
+        }
+      if (!any) g_rec.lightDown = false;
     }
     std::string pressed;
     for (int i = 0; i < 4; ++i) {
@@ -188,8 +242,17 @@ void OnEvent(const uint8_t* r, size_t n) {
   }
   if (idx && r[2] == idx && (r[3] >> 4) == 1) {
     const int dx = int16_t((r[4] << 8) | r[5]), dy = int16_t((r[6] << 8) | r[7]);
+    if (g_recording) {  // the finder only counts these (there are lots)
+      std::lock_guard<std::mutex> lk(g_recM);
+      if (g_rec.raw++ < 3) Out("  [%7.3f s] raw motion dx=%d dy=%d\n", t, dx, dy);
+      return;
+    }
     Out("  [%7.3f s] raw motion dx=%d dy=%d\n", t, dx, dy);
     return;
+  }
+  if (g_recording) {
+    std::lock_guard<std::mutex> lk(g_recM);
+    ++g_rec.other;
   }
   Out("  [%7.3f s] message: %s\n", t, Hex(r, std::min<size_t>(n, 12)).c_str());
 }
@@ -391,6 +454,350 @@ void Watch() {
   Out("Done.\n");
 }
 
+// ------------------------------------------------------------------ hard press finder
+// Tries, one at a time, the ways the remote could be set up so that it reports the hard
+// press, and watches for it by itself: the user only presses. Everything is undone
+// afterwards; a way that Limelight can use is saved to settings.ini.
+namespace finder {
+
+struct ForceBtn {
+  uint8_t i = 0;
+  uint16_t def = 0, mn = 0, mx = 0;
+  Reply orig;  // as read at the start, put back at the end
+};
+uint8_t g_fi = 0, g_hi = 0;     // force sensing / haptic feature indexes (0 = none)
+std::vector<ForceBtn> g_force;  // adjustable force buttons
+bool g_forceChanged = false;
+Reply g_hapticOrig;
+
+uint16_t Be16(const uint8_t* p) { return uint16_t((p[0] << 8) | p[1]); }
+
+// Report a control to us for this step (flags2: the second flags byte of newer remotes).
+// Returns false (and says why in note) if the remote refuses.
+bool Divert(uint16_t cid, uint8_t flags, std::string& note, uint8_t flags2 = 0) {
+  const uint8_t idx = g_reprogIdx.load();
+  uint8_t p[6] = {uint8_t(cid >> 8), uint8_t(cid & 0xFF), flags, 0, 0, flags2};
+  Reply r = g_dev->CallDev(g_dev->devIdx, idx, 3, p, flags2 ? 6 : 5, 450, p, 2);
+  Sleep(40);
+  if (r.ok) {
+    auto& u = g_findUndo[cid];
+    u.first |= uint8_t(0x02 | (flags & 0x20) | (flags & 0x80));
+    if (flags2) u.second |= 0x02;
+    return true;
+  }
+  char b[96];
+  snprintf(b, sizeof b, "%s%04X flags %02X%s refused: %s", note.empty() ? "" : "; ", cid, flags,
+           flags2 ? "+" : "", r.Describe().c_str());
+  note += b;
+  return false;
+}
+
+// Set every force button to its default (which = 0) or lowest value (which = 1).
+bool Force(int which, std::string& note) {
+  bool ok = !g_force.empty();
+  for (auto& f : g_force) {
+    Reply cur = g_dev->Call(g_fi, 2, {f.i});
+    if (!cur.ok) {
+      ok = false;
+      continue;
+    }
+    const uint16_t v = which == 1 ? f.mn : f.def;
+    Reply w = ForceWrite(g_fi, f.i, cur, v);
+    g_forceChanged = true;
+    Sleep(40);
+    char b[96];
+    snprintf(b, sizeof b, "%sforce %u -> %u: %s", note.empty() ? "" : "; ", Be16(cur.d), v,
+             w.Describe().c_str());
+    note += b;
+    if (!w.ok) ok = false;
+  }
+  return ok;
+}
+
+void Haptic(bool on) {
+  if (!g_hi) return;
+  g_dev->Call(g_hi, 2, {uint8_t(on ? 1 : 0), 60});
+  Sleep(40);
+}
+
+void RestoreForce() {
+  for (auto& f : g_force)
+    if (f.orig.ok) {
+      ForceWrite(g_fi, f.i, f.orig, Be16(f.orig.d));
+      Sleep(40);
+    }
+  g_forceChanged = false;
+}
+
+void Reset() {  // put every control (and the force setting) back the way it was
+  for (auto& u : g_findUndo) {
+    const uint16_t cid = u.first;
+    uint8_t p[6] = {uint8_t(cid >> 8), uint8_t(cid & 0xFF), u.second.first, 0, 0, u.second.second};
+    g_dev->CallDev(g_dev->devIdx, g_reprogIdx.load(), 3, p, u.second.second ? 6 : 5, 450, p, 2);
+    Sleep(40);
+  }
+  g_findUndo.clear();
+  if (g_forceChanged) RestoreForce();
+}
+
+bool Base(std::string& note) {  // what Limelight itself does with the buttons
+  const bool a = Divert(CID_HIGHLIGHT_SOFT, 0x23, note);
+  const bool b = Divert(CID_HIGHLIGHT_HARD, 0x23, note);
+  Haptic(true);
+  return a && b;
+}
+
+// Listen for up to `seconds`; stop early once a hard press was seen and let go.
+Rec Listen(int seconds) {
+  {
+    std::lock_guard<std::mutex> lk(g_recM);
+    g_rec = Rec{};
+  }
+  g_recording = true;
+  const double end = NowMs() + seconds * 1000.0;
+  while (NowMs() < end) {
+    Sleep(40);
+    std::lock_guard<std::mutex> lk(g_recM);
+    if ((g_rec.hard || !g_rec.during.empty()) && !g_rec.lightDown) break;
+  }
+  Sleep(200);
+  g_recording = false;
+  std::lock_guard<std::mutex> lk(g_recM);
+  return g_rec;
+}
+
+std::string Cids(const std::set<uint16_t>& s) {
+  std::string out;
+  for (uint16_t c : s) {
+    char b[8];
+    snprintf(b, sizeof b, "%s%04X", out.empty() ? "" : " ", c);
+    out += b;
+  }
+  return out;
+}
+
+// One screen with everything that matters for the hard press (easy to photograph).
+void Fingerprint() {
+  uint8_t maj = 0, min = 0;
+  g_dev->ProtocolVersion(maj, min);
+  Out("Remote: '%s' via %s, HID++ %u.%u, Limelight %s\n", g_dev->ReadName().c_str(),
+      g_dev->viaReceiver ? "USB receiver" : "Bluetooth", maj, min, Narrow(APP_VERSION).c_str());
+  for (uint16_t cid : {CID_HIGHLIGHT_SOFT, CID_HIGHLIGHT_HARD}) {
+    uint16_t flags = 0;
+    bool listed = false;
+    for (auto& k : g_controls)
+      if (k.cid == cid) {
+        flags = k.flags;
+        listed = true;
+      }
+    Reply g = g_dev->GetCidReporting(cid);
+    Out("Control %04X (%s): %s%04X, reporting now [%s]\n", cid,
+        cid == CID_HIGHLIGHT_SOFT ? "light" : "hard", listed ? "flags " : "NOT LISTED ", flags,
+        g.ok ? Hex(g.d, 6).c_str() : g.Describe().c_str());
+  }
+  if (g_hi) {
+    Reply st = g_dev->Call(g_hi, 1, {});
+    Out("Haptics 19B0: state [%s]\n", st.ok ? Hex(st.d, 4).c_str() : st.Describe().c_str());
+  } else {
+    Out("Haptics 19B0: not offered\n");
+  }
+  Pressure(false);  // raw force sensing data, and whether writing it back works
+  Settings s;
+  s.Load();
+  s.Sanitize();
+  Out("Settings: hard press force %s, hard press control %04X, real laser %s (%04X)\n",
+      kPressureNames[s.pressure], s.hardCid ? s.hardCid : 0x01A8, s.physicalLaser ? "ON" : "off",
+      s.laserSrcCid);
+}
+
+}  // namespace finder
+
+void HardPressFinder() {
+  using namespace finder;
+  Out("\n=== Hard press finder ===\n");
+  Undo();
+  g_controls = g_dev->ReadControls(true);
+  g_fi = g_dev->FeatureIndex(F_FORCE_BUTTON);
+  g_hi = g_dev->FeatureIndex(F_HAPTIC);
+  g_force.clear();
+  if (g_fi) {
+    Reply n = g_dev->Call(g_fi, 0, {});
+    for (int b = 0; n.ok && b < std::min<int>(n.d[0], 4); ++b) {
+      Reply caps = g_dev->Call(g_fi, 1, {uint8_t(b)});
+      if (!caps.ok) continue;
+      ForceBtn f;
+      f.i = uint8_t(b);
+      f.def = Be16(caps.d + 2);
+      f.mx = Be16(caps.d + 4);
+      f.mn = Be16(caps.d + 6);
+      f.orig = g_dev->Call(g_fi, 2, {uint8_t(b)});
+      if (f.mx > f.mn && f.def >= f.mn && f.def <= f.mx) g_force.push_back(f);
+    }
+  }
+  g_hapticOrig = g_hi ? g_dev->Call(g_hi, 1, {}) : Reply{};
+  Fingerprint();
+
+  struct Step {
+    const char* name;
+    const char* note;  // shown to the user, or nullptr
+    std::function<bool(std::string&)> apply;  // false = not possible here: skipped
+    int save;  // 0 nothing needed, 1 force Medium, 2 force Lightest, 3 other control,
+               // 4 vibration off, 5 needs a change in Limelight
+  };
+  const std::vector<Step> steps = {
+      {"Limelight's button setup", nullptr, [](std::string& n) { return Base(n); }, 0},
+      {"Pressure set to the remote's default", nullptr,
+       [](std::string& n) { return Base(n) && Force(0, n); }, 1},
+      {"Pressure set to the lightest", nullptr,
+       [](std::string& n) { return Base(n) && Force(1, n); }, 2},
+      {"Motion sent to the app, like Options+",
+       "the pointer will not move during this step",
+       [](std::string& n) {
+         const bool a = Divert(CID_HIGHLIGHT_SOFT, 0x33, n);
+         const bool b = Divert(CID_HIGHLIGHT_HARD, 0x33, n);
+         Haptic(true);
+         return a && b;
+       },
+       5},
+      {"Every button reported", "press only the highlight button",
+       [](std::string& n) {
+         const bool ok = Base(n);
+         for (auto& k : g_controls)  // virtual ones too: the hard press might be one
+           if ((k.flags & KF_DIVERTABLE) && k.cid != CID_HIGHLIGHT_SOFT &&
+               k.cid != CID_HIGHLIGHT_HARD)
+             Divert(k.cid, uint8_t(0x03 | RawValid(k.cid)), n);
+         return ok;
+       },
+       3},
+      {"Key analytics reports on", nullptr,
+       [](std::string& n) {
+         const bool a = Divert(CID_HIGHLIGHT_SOFT, 0x23, n, 0x03);
+         const bool b = Divert(CID_HIGHLIGHT_HARD, 0x23, n, 0x03);
+         Haptic(true);
+         return a && b;
+       },
+       5},
+      {"Forced motion reports on the hard press", nullptr,
+       [](std::string& n) {
+         const bool a = Divert(CID_HIGHLIGHT_SOFT, 0x23, n);
+         const bool b = Divert(CID_HIGHLIGHT_HARD, 0xE3, n);
+         Haptic(true);
+         return a && b;
+       },
+       5},
+      {"Only the hard press reported", "a light press shows nothing during this step",
+       [](std::string& n) {
+         const bool ok = Divert(CID_HIGHLIGHT_HARD, 0x23, n);
+         Haptic(true);
+         return ok;
+       },
+       5},
+      {"Vibration switched off", nullptr,
+       [](std::string& n) {
+         if (!g_hi) return false;
+         const bool ok = Base(n);
+         Haptic(false);
+         return ok;
+       },
+       4},
+  };
+
+  Out("\nI'll try %zu ways of setting up the remote. In EACH step, when it says NOW:\n"
+      "press the highlight button HARD - all the way - hold it for a second, then let go.\n"
+      "Each step listens for 9 seconds and moves on by itself. Nothing is changed\n"
+      "permanently.\n",
+      steps.size());
+  Ask("Press Enter to start... ");
+
+  std::vector<std::string> results(steps.size());
+  int found = -1;
+  uint16_t foundCid = 0;
+  for (size_t i = 0; i < steps.size() && found < 0; ++i) {
+    const Step& st = steps[i];
+    Out("\nStep %zu of %zu: %s\n", i + 1, steps.size(), st.name);
+    g_t0 = NowMs();
+    std::string note;
+    if (!st.apply(note)) {
+      results[i] = note.empty() ? "skipped (not offered by this remote)" : "skipped: " + note;
+      Out("  %s\n", results[i].c_str());
+      Reset();
+      continue;
+    }
+    if (!note.empty()) Out("  (%s)\n", note.c_str());
+    Out("  NOW: press the highlight button HARD, hold it, let go%s%s%s\n", st.note ? " (" : "",
+        st.note ? st.note : "", st.note ? ")" : "");
+    const Rec rec = Listen(9);
+    std::set<uint16_t> others = rec.during;
+    others.erase(CID_HIGHLIGHT_HARD);
+    std::set<uint16_t> extra = rec.all;
+    extra.erase(CID_HIGHLIGHT_SOFT);
+    extra.erase(CID_HIGHLIGHT_HARD);
+    char b[200];
+    if (rec.hard) {
+      snprintf(b, sizeof b, "HARD PRESS SEEN");
+      found = int(i);
+    } else if (st.save == 3 && !others.empty()) {
+      snprintf(b, sizeof b, "HARD PRESS SEEN as %s", Cids(others).c_str());
+      found = int(i);
+      foundCid = *others.begin();
+    } else if (rec.light) {
+      snprintf(b, sizeof b, "light only%s%s", extra.empty() ? "" : ", also ", Cids(extra).c_str());
+    } else if (!extra.empty()) {
+      snprintf(b, sizeof b, "only %s", Cids(extra).c_str());
+    } else if (rec.raw) {
+      snprintf(b, sizeof b, "motion only");
+    } else {
+      snprintf(b, sizeof b, "nothing (no press seen)");
+    }
+    results[i] = b;
+    if (rec.raw) results[i] += ", motion x" + std::to_string(rec.raw);
+    if (rec.other) results[i] += ", other msgs x" + std::to_string(rec.other);
+    if (!note.empty() && (st.save == 1 || st.save == 2)) results[i] += " (" + note + ")";
+    Out("  -> %s\n", results[i].c_str());
+    Reset();
+  }
+  RestoreForce();
+  if (g_hi && g_hapticOrig.ok)
+    g_dev->Call(g_hi, 2, {uint8_t(g_hapticOrig.d[0] & 1),
+                          g_hapticOrig.d[1] ? g_hapticOrig.d[1] : uint8_t(60)});
+
+  Out("\n=== Hard press finder: results ===\n");
+  for (size_t i = 0; i < steps.size(); ++i)
+    Out(" %zu %-46s %s\n", i + 1, steps[i].name, results[i].empty() ? "-" : results[i].c_str());
+  if (found < 0) {
+    Out("\nNothing made the remote report the hard press. Please send a photo of this\n"
+        "screen (from \"=== Hard press finder ===\" down) to the Limelight developer.\n");
+    return;
+  }
+  Settings s;
+  s.Load();
+  s.Sanitize();
+  switch (steps[found].save) {
+    case 0:
+      Out("\nThe hard press works with Limelight's own setup right now.\n");
+      return;
+    case 1:
+      s.pressure = 2;  // Medium = the remote's default
+      break;
+    case 2:
+      s.pressure = 0;  // Lightest
+      break;
+    case 3:
+      s.hardCid = foundCid;
+      break;
+    case 4:
+      s.haptics = HapticMode::Off;
+      break;
+    default:
+      Out("\n*** Found a way (step %d), but Limelight needs a small change to use it.\n"
+          "Please send a photo of this screen to the Limelight developer. ***\n",
+          found + 1);
+      return;
+  }
+  s.Save();
+  Out("\n*** Found it (step %d) and saved it: Limelight uses it from now on. ***\n", found + 1);
+}
+
 // ------------------------------------------------------------------ vibration
 const char* WaveName(int w) {
   static const char* n[] = {"sharp state change", "damp state change", "sharp collision",
@@ -520,10 +927,12 @@ void LaserFinder() {
 }  // namespace
 
 int RunDiagnostics() {
+#ifndef LIMELIGHT_DIAG_TEST  // the test drives it through ordinary stdin/stdout
   AllocConsole();
   FILE* f;
   freopen_s(&f, "CONOUT$", "w", stdout);
   freopen_s(&f, "CONIN$", "r", stdin);
+#endif
   SetConsoleOutputCP(CP_UTF8);
   SetConsoleTitleW(L"Limelight diagnostics");
   SetConsoleCtrlHandler(CtrlHandler, TRUE);
@@ -557,15 +966,17 @@ int RunDiagnostics() {
     Out("\nWhat would you like to do?\n"
         "  1  Device report (safe, read-only)\n"
         "  2  Watch the buttons (see what each press sends)\n"
-        "  3  Test vibration\n"
-        "  4  Laser finder (switch the real laser on)\n"
-        "  5  Quit\n");
+        "  3  Hard press finder (when the hard press does nothing)\n"
+        "  4  Test vibration\n"
+        "  5  Laser finder (switch the real laser on)\n"
+        "  6  Quit\n");
     const std::string a = Ask("> ");
     if (a == "1") Report();
     else if (a == "2") Watch();
-    else if (a == "3") Vibration();
-    else if (a == "4") LaserFinder();
-    else if (a == "5" || a == "q" || a == "quit") break;
+    else if (a == "3") HardPressFinder();
+    else if (a == "4") Vibration();
+    else if (a == "5") LaserFinder();
+    else if (a == "6" || a == "q" || a == "quit") break;
   }
 
   Undo();

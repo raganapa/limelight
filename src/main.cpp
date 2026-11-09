@@ -361,6 +361,7 @@ Presenter::Config App::PresenterConfig() const {
   c.hapticEnabled = s_.haptics != HapticMode::Off;
   c.hapticLevel = s_.hapticStrength;
   c.pressure = s_.pressure;
+  c.hardCid = uint16_t(s_.hardCid);
   return c;
 }
 

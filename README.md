@@ -20,7 +20,7 @@ no cloud. It talks to the remote directly over Logitech's HID++ protocol, the sa
 - **Light press and hard press** on the highlight button each get their own effect, like
   Logitech's app. The remote's two pressure levels are read directly, so effects appear the
   instant you press and vanish the instant you let go.
-- **Hard press force** — Soft, Medium or Firm, the same choice as *pressure* in Logi Options+.
+- **Hard press force** — Lightest, Soft, Medium or Firm, like *pressure* in Logi Options+.
 - **Smooth**: frames are synced to your display's refresh (60/120/144 Hz), only the pixels that
   change are redrawn, effects fade in and out, and the pointer is hidden while an effect is on.
 - **Vibration** feedback on hard press (or every press).
@@ -77,7 +77,7 @@ that works it out on your own remote:
 
 1. Right-click the tray icon → **Laser finder & diagnostics…** (or Start menu →
    *Limelight diagnostics*).
-2. Choose **4 — Laser finder**. Point the remote at a wall (never at eyes).
+2. Choose **5 — Laser finder**. Point the remote at a wall (never at eyes).
 3. It asks you to press a button and answer **y/n**: did the laser light up? It tries the
    remote's own laser functions one by one. Nothing is changed permanently.
 4. When it finds the combination it saves it, and **Real laser** becomes available in
@@ -85,7 +85,8 @@ that works it out on your own remote:
 
 If it doesn't find it, a report is saved on your Desktop as `Limelight report.txt` —
 please attach it to an issue so the laser can be supported for everyone. The same tool can
-show what every button sends (option 2) and test vibration (option 3).
+show what every button sends (option 2), find a setup that makes the hard press work
+(option 3) and test vibration (option 4).
 
 ## Troubleshooting
 
@@ -93,9 +94,12 @@ show what every button sends (option 2) and test vibration (option 3).
   hard. *Light press* and *Hard press* in the **Remote check** row light up while pressed (and get
   a tick once seen). If neither lights up but the spotlight still appears, the app is not getting
   the remote's button messages; send the log file below.
-- **The light press works but the hard press does nothing** — set **Hard press force** to *Soft*
-  in Settings and try again with the Remote check row. Limelight sends this setting to the remote
-  each time it connects or wakes up, and checks it whenever you start a light press.
+- **The light press works but the hard press does nothing** — run **Limelight diagnostics** (Start
+  menu) and choose **3 — Hard press finder**. It tries the remote's settings one by one while you
+  press hard, notices by itself when the hard press arrives, and saves what works. You can also
+  try **Hard press force** in Settings with the Remote check row. Limelight sends the force
+  setting to the remote each time it connects or wakes up, and checks it whenever you start a
+  light press.
 - **"Looking for your Spotlight 2…"** — press any button to wake the remote. Over Bluetooth,
   make sure it is paired in Windows Settings. With the USB receiver, make sure the receiver that
   came with the remote is plugged in.
@@ -126,7 +130,7 @@ pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-nsis
 
 The GitHub Actions workflow in `.github/workflows/build.yml` builds both files on every push and
 runs the protocol tests on a real Windows runner. **To publish a release with the .exe files:**
-on GitHub go to *Releases → Draft a new release*, create a tag such as `v1.0.2`, and click
+on GitHub go to *Releases → Draft a new release*, create a tag such as `v1.0.3`, and click
 *Publish*. A few minutes later `Limelight-Setup.exe` and `Limelight.exe` appear under the
 release's *Assets*. For a release that already exists, open *Actions → build → Run workflow*
 and enter its tag. (You can always attach the files by hand too: edit the release and drop them
@@ -136,6 +140,8 @@ into the *Attach binaries* box.)
 `test_presenter.exe` (Bluetooth), `test_presenter.exe receiver` (behind a Bolt receiver shared
 with a mouse) and `test_presenter.exe quirky` (a remote that does not flag the hard press as
 divertable, tags its button events differently and drops a command).
+`build/test_diag.exe` runs the diagnostics' hard press finder against the simulated remote with
+a simulated user pressing the button: `printf '3\n\n6\n' | wine build/test_diag.exe [alt]`.
 
 ## How it works
 
@@ -148,7 +154,7 @@ divertable, tags its button events differently and drops a command).
 | `src/raster.cpp` | The pixel work: soft-edged holes, laser sprite, magnifier lens, anti-aliased ink. |
 | `src/main.cpp` | Tray app: what each button does, hotkeys, raw input, settings plumbing. |
 | `src/ui.cpp` | The custom-drawn settings window. |
-| `src/diag.cpp` | `Limelight.exe --diagnostics`: report, button watcher, vibration test, Laser finder. |
+| `src/diag.cpp` | `Limelight.exe --diagnostics`: report, button watcher, hard press finder, vibration test, Laser finder. |
 
 What the Spotlight 2 does over HID++ (none of it is documented by Logitech):
 

@@ -134,14 +134,28 @@ class Device {
 bool IsSpotlightPid(uint16_t pid);
 bool IsReceiverPid(uint16_t pid);
 
-// Force sensing value for a "pressure" choice like the one in Logi Options+:
-// 0 Soft = halfway between the lightest press the remote allows and its default,
-// 1 Medium = the remote's own default, 2 Firm = halfway between the default and the firmest.
-inline uint16_t PressureTarget(uint16_t def, uint16_t mn, uint16_t mx, int preset) {
+// Force sensing value for a hard press "force" level (like "pressure" in Logi Options+),
+// around the remote's own default: 0 Lightest = the lowest value the remote allows,
+// 1 Soft = halfway between that and the default, 2 Medium = the default, 3 Firm = as far
+// above the default as Lightest is below it. (The Spotlight 2 refuses values far above
+// its default even though it reports a much higher maximum.)
+inline uint16_t PressureTarget(uint16_t def, uint16_t mn, uint16_t mx, int level) {
   int t = def;
-  if (preset == 0) t = mn + (int(def) - mn) / 2;
-  else if (preset == 2) t = def + (int(mx) - def) / 2;
+  if (level <= 0) t = mn;
+  else if (level == 1) t = def - (int(def) - mn) / 2;
+  else if (level >= 3) t = def + (int(def) - mn);
   return uint16_t(t < mn ? mn : t > mx ? mx : t);
+}
+
+// The force sensing button's "set" takes the same layout as its "get" returns, after the
+// button number: build it from a fresh read so that values we do not understand are kept.
+inline size_t ForceSetParams(uint8_t button, const uint8_t* current, uint16_t value,
+                             uint8_t out[16]) {
+  out[0] = button;
+  memcpy(out + 1, current, 15);
+  out[1] = uint8_t(value >> 8);
+  out[2] = uint8_t(value & 0xFF);
+  return 16;
 }
 
 }  // namespace hidpp

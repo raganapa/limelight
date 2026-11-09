@@ -29,8 +29,13 @@ bool quirky = false;
 bool droppedHardOnce = false;
 // Force sensing (0x19C0), one button. After a restart the remote has no usable pressure
 // setting until a host sends one (the quirky remote has no such feature: fixed threshold).
+// Like the real Spotlight 2, "get" answers with a second value after the first, and a
+// "set" that does not carry it along is refused.
 const uint16_t kForceDef = 200, kForceMin = 40, kForceMax = 400, kForceUnset = 0xFFFF;
+const uint16_t kForceSecond = 0x0190;
 uint16_t forceCur = kForceUnset;
+uint16_t hardAs = 0x01A8;  // the control the remote reports for a hard press
+bool needsDefaultForce = false;  // hard press only fires once the force is at most default
 int deliberateDrops = 0;
 const uint8_t kSlot = 2;     // the Spotlight's pairing slot on the receiver
 const uint8_t kOtherSlot = 1;  // another Logitech device (a mouse) on the same receiver
@@ -176,10 +181,13 @@ void Handle(const uint8_t* q) {
         return Reply(q, {0x00, 0x01, uint8_t(kForceDef >> 8), uint8_t(kForceDef),
                          uint8_t(kForceMax >> 8), uint8_t(kForceMax), uint8_t(kForceMin >> 8),
                          uint8_t(kForceMin)});
-      if (fn == 2) return Reply(q, {uint8_t(forceCur >> 8), uint8_t(forceCur)});
+      if (fn == 2)
+        return Reply(q, {uint8_t(forceCur >> 8), uint8_t(forceCur), uint8_t(kForceSecond >> 8),
+                         uint8_t(kForceSecond)});
       if (fn == 3) {
         const uint16_t v = uint16_t((p[1] << 8) | p[2]);
-        if (v < kForceMin || v > kForceMax) return Error(q, 2);
+        const uint16_t second = uint16_t((p[3] << 8) | p[4]);
+        if (v < kForceMin || v > kForceMax || second != kForceSecond) return Error(q, 2);
         forceCur = v;
         return Reply(q, {});
       }
@@ -242,8 +250,9 @@ void Press(int force) {
   {
     std::lock_guard<std::mutex> lk(m);
     const int threshold = quirky ? 150 : forceCur;
-    const bool hard = force > 0 && force >= threshold && (reporting[0x01A8] & 0x01);
-    if (hard) cids.push_back(0x01A8);  // like the real remote: the hard level alone
+    const bool hard = force > 0 && force >= threshold && (reporting[hardAs] & 0x01) &&
+                      (!needsDefaultForce || forceCur <= kForceDef);
+    if (hard) cids.push_back(hardAs);  // like the real remote: the hard level alone
     else if (force > 0 && (reporting[0x00D8] & 0x01)) cids.push_back(0x00D8);
   }
   std::vector<uint8_t> r(20, 0);
@@ -256,6 +265,17 @@ void Press(int force) {
     r[5 + 2 * i] = uint8_t(cids[i]);
   }
   Push(r);
+}
+
+void SetForceScenario(uint16_t start, bool needsDefault) {
+  std::lock_guard<std::mutex> lk(m);
+  forceCur = start;
+  needsDefaultForce = needsDefault;
+}
+
+void SetHardAs(uint16_t cid) {
+  std::lock_guard<std::mutex> lk(m);
+  hardAs = cid;
 }
 
 int ForceValue() {

@@ -23,12 +23,13 @@ class Presenter {
     uint16_t laserSrc = 0, laserDst = 0;
     bool hapticEnabled = true;
     int hapticLevel = 60;
-    int pressure = 1;  // force needed for the hard press: 0 soft, 1 medium, 2 firm
+    int pressure = 2;  // hard press force: 0 lightest, 1 soft, 2 medium, 3 firm
+    uint16_t hardCid = 0;  // the hard press arrives as this control too (0 = only 0x01A8)
     bool operator==(const Config& o) const {
       return divertSoft == o.divertSoft && divertHard == o.divertHard &&
              divertAction == o.divertAction && laserOn == o.laserOn && laserSrc == o.laserSrc &&
              laserDst == o.laserDst && hapticEnabled == o.hapticEnabled &&
-             hapticLevel == o.hapticLevel && pressure == o.pressure;
+             hapticLevel == o.hapticLevel && pressure == o.pressure && hardCid == o.hardCid;
     }
   };
 
@@ -61,8 +62,8 @@ class Presenter {
   void QuickCheck();
   uint8_t DivertFlags(uint16_t cid, bool on) const;
   void ReadForceButtons();
-  void ApplyPressure(int preset, bool always);
-  bool CheckPressure(int preset);
+  void ApplyPressure(int level, bool always);
+  bool CheckPressure(int level);
   void ReadBattery();
   void OnNotify(const uint8_t* r, size_t n);
   void OnGone();
@@ -104,12 +105,15 @@ class Presenter {
   };
   std::vector<ForceButton> force_;
   int pressureApplied_ = -1;
+  // Writes a force value in the layout the remote reads back (fresh = a read just done).
+  hidpp::Reply WriteForce(ForceButton& f, uint16_t value, const hidpp::Reply* fresh);
 
   // read from reader threads
   std::atomic<uint8_t> devIdx_{0xFF}, idxReprog_{0}, idxHaptic_{0}, idxBattery_{0},
       idxWireless_{0}, idxForce_{0};
   std::atomic<bool> viaReceiver_{false}, unifiedBattery_{true};
   std::atomic<LPARAM> buttons_{0};
+  std::atomic<uint16_t> hardCid_{0};  // extra control that means "hard press" (finder)
   std::atomic<int> otherMessages_{0};
 
   // status

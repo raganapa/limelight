@@ -15,7 +15,8 @@ struct Settings {
   Effect softPress = Effect::Spotlight;
   Effect hardPress = Effect::Laser;
   ActionMode actionButton = ActionMode::Default;
-  int pressure = 1;         // force needed for the hard press: 0 soft, 1 medium, 2 firm
+  int pressure = 2;         // hard press force: 0 lightest, 1 soft, 2 medium, 3 firm
+  int hardCid = 0;          // control the hard press arrives as, if not 0x01A8 (finder)
 
   // Look (sizes are in pixels at 100% display scaling).
   int spotRadius = 190;     // 80..500

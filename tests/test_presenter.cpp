@@ -131,15 +131,19 @@ int main(int argc, char** argv) {
   if (!quirky) {
     CHECK(p.HasPressure());
     CHECK(mock::ForceValue() == 200);  // Medium = the remote's own default, sent at connect
-    c.pressure = 0;
+    c.pressure = 1;
     p.Configure(c);
     Pump(400);
     CHECK(mock::ForceValue() == 120);  // Soft: halfway to the lightest
-    c.pressure = 2;
+    c.pressure = 3;
     p.Configure(c);
     Pump(400);
-    CHECK(mock::ForceValue() == 300);  // Firm: halfway to the firmest
-    c.pressure = 1;
+    CHECK(mock::ForceValue() == 360);  // Firm: as far above the default as Lightest is below
+    c.pressure = 0;
+    p.Configure(c);
+    Pump(400);
+    CHECK(mock::ForceValue() == 40);   // Lightest
+    c.pressure = 2;
     p.Configure(c);
     Pump(400);
     CHECK(mock::ForceValue() == 200);
@@ -181,6 +185,25 @@ int main(int argc, char** argv) {
   b = Buttons();
   CHECK(b.size() == 3 && b[0] == BTN_SOFT && b[1] == BTN_HARD && b[2] == 0);
   CHECK(Rep(0x01A8) == 1);
+
+  printf("hard press reported as another control (found by the finder)\n");
+  mock::SetHardAs(0x00FB);
+  c.hardCid = 0x00FB;
+  p.Configure(c);
+  Pump(400);
+  CHECK(Rep(0x00FB) == 1);
+  g_events.clear();
+  mock::Press(300);
+  Pump(150);
+  mock::Press(0);
+  Pump(150);
+  b = Buttons();
+  CHECK(b.size() == 2 && b[0] == BTN_HARD && b[1] == 0);
+  mock::SetHardAs(0x01A8);
+  c.hardCid = 0;
+  p.Configure(c);
+  Pump(400);
+  CHECK(Rep(0x00FB) == 0);  // handed back
 
   printf("haptics\n");
   size_t before;

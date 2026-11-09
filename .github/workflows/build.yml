@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Attach the .exe files to this existing release (for example v1.0.2)"
+        description: "Attach the .exe files to this existing release (for example v1.0.3)"
         required: false
         default: ""
 
@@ -39,7 +39,7 @@ jobs:
       - name: Collect the files
         run: |
           mkdir -p out
-          cp dist/Limelight.exe dist/Limelight-Setup.exe build/test_presenter.exe out/
+          cp dist/Limelight.exe dist/Limelight-Setup.exe build/test_presenter.exe build/test_diag.exe out/
 
       - uses: actions/upload-artifact@v4
         with:
@@ -61,6 +61,13 @@ jobs:
           .\test_presenter.exe receiver
           if ($LASTEXITCODE -ne 0) { exit 1 }
           .\test_presenter.exe quirky
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Hard press finder against the simulated remote
+        run: |
+          "3`n`n6`n" | .\test_diag.exe
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "3`n`n6`n" | .\test_diag.exe alt
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       # Informational: a runner without a real desktop must not block a release.

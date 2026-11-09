@@ -59,7 +59,8 @@ void Settings::Load() {
   softPress = EffectFromKey(GetStr(L"Buttons", L"LightPress", EffectKey(d.softPress), p), d.softPress);
   hardPress = EffectFromKey(GetStr(L"Buttons", L"HardPress", EffectKey(d.hardPress), p), d.hardPress);
   actionButton = ActionMode(GetInt(L"Buttons", L"ActionButton", int(d.actionButton), p));
-  pressure = GetInt(L"Buttons", L"HardPressForce", d.pressure, p);
+  pressure = GetInt(L"Buttons", L"HardPressLevel", d.pressure, p);
+  hardCid = GetInt(L"Buttons", L"HardPressCid", 0, p);
 
   spotRadius = GetInt(L"Look", L"SpotlightSize", d.spotRadius, p);
   dimPercent = GetInt(L"Look", L"Dim", d.dimPercent, p);
@@ -92,7 +93,8 @@ void Settings::Sanitize() {
   if (!validEffect(softPress)) softPress = Effect::Spotlight;
   if (!validEffect(hardPress)) hardPress = Effect::Laser;
   if (int(actionButton) < 0 || int(actionButton) > 3) actionButton = ActionMode::Default;
-  pressure = Clamp(pressure, 0, 2);
+  pressure = Clamp(pressure, 0, 3);
+  if (hardCid < 0 || hardCid > 0xFFFF || hardCid == 0x00D8 || hardCid == 0x01A8) hardCid = 0;
   spotRadius = Clamp(spotRadius, 80, 500);
   dimPercent = Clamp(dimPercent, 20, 95);
   softness = Clamp(softness, 0, 100);
@@ -111,7 +113,8 @@ void Settings::Save() const {
   PutStr(L"Buttons", L"LightPress", EffectKey(softPress), p);
   PutStr(L"Buttons", L"HardPress", EffectKey(hardPress), p);
   PutInt(L"Buttons", L"ActionButton", int(actionButton), p);
-  PutInt(L"Buttons", L"HardPressForce", pressure, p);
+  PutInt(L"Buttons", L"HardPressLevel", pressure, p);
+  PutInt(L"Buttons", L"HardPressCid", hardCid, p);
 
   PutInt(L"Look", L"SpotlightSize", spotRadius, p);
   PutInt(L"Look", L"Dim", dimPercent, p);
