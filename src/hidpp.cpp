@@ -150,7 +150,9 @@ void Device::OnReport(const uint8_t* r, size_t n) {
     std::lock_guard<std::mutex> lk(m_);
     if (pending_ && !done_) {
       const bool devOk = viaReceiver ? (r[1] == pDev_) : true;
-      if (devOk && r[2] == pFeat_ && r[3] == pFnSw_) {
+      const bool echoOk = pExpectLen_ == 0 || (n >= 4 + pExpectLen_ &&
+                                               memcmp(r + 4, pExpect_, pExpectLen_) == 0);
+      if (devOk && r[2] == pFeat_ && r[3] == pFnSw_ && echoOk) {
         reply_ = Reply{};
         reply_.ok = true;
         memcpy(reply_.d, r + 4, std::min<size_t>(16, n - 4));
@@ -178,7 +180,7 @@ void Device::OnReport(const uint8_t* r, size_t n) {
 }
 
 Reply Device::CallDev(uint8_t dev, uint8_t feat, uint8_t fn, const uint8_t* params, size_t n,
-                      int timeoutMs) {
+                      int timeoutMs, const uint8_t* expect, size_t expectLen) {
   std::lock_guard<std::mutex> callLock(callMutex_);
   const double since = NowMs() - lastWrite_;
   if (since < 35) Sleep(DWORD(35 - since));
@@ -191,6 +193,8 @@ Reply Device::CallDev(uint8_t dev, uint8_t feat, uint8_t fn, const uint8_t* para
     pDev_ = dev;
     pFeat_ = feat;
     pFnSw_ = buf[3];
+    pExpectLen_ = expect ? std::min<size_t>(expectLen, sizeof pExpect_) : 0;
+    if (pExpectLen_) memcpy(pExpect_, expect, pExpectLen_);
     reply_ = Reply{};
   }
   const bool wrote = long_.Write(buf, sizeof buf);
@@ -299,7 +303,10 @@ bool Device::Locate(std::string* nameOut) {
   std::vector<Cand> others;
   for (uint8_t idx : idxs) {
     const uint8_t p[2] = {uint8_t(F_REPROG_V4 >> 8), uint8_t(F_REPROG_V4 & 0xFF)};
-    Reply r = CallDev(idx, 0x00, 0, p, 2, viaReceiver ? 300 : 450);
+    Reply r = CallDev(idx, 0x00, 0, p, 2, viaReceiver ? 300 : (idx == 0xFF ? 450 : 250));
+    // Over Bluetooth a failed write means the remote is not there (asleep): asking
+    // other device numbers would only make each attempt slower.
+    if (r.writeFailed && !viaReceiver) return false;
     if (!r.ok || r.d[0] == 0) continue;
     devIdx = idx;
     features_.clear();
@@ -365,8 +372,9 @@ Reply Device::SetCidReporting(uint16_t cid, uint8_t flags, uint16_t remap) {
     r.error = 9;
     return r;
   }
-  return Call(idx, 3, {uint8_t(cid >> 8), uint8_t(cid & 0xFF), flags, uint8_t(remap >> 8),
-                       uint8_t(remap & 0xFF)});
+  const uint8_t p[5] = {uint8_t(cid >> 8), uint8_t(cid & 0xFF), flags, uint8_t(remap >> 8),
+                        uint8_t(remap & 0xFF)};
+  return CallDev(devIdx, idx, 3, p, sizeof p, 450, p, 2);  // the reply echoes the CID
 }
 
 Reply Device::GetCidReporting(uint16_t cid) {
@@ -376,7 +384,8 @@ Reply Device::GetCidReporting(uint16_t cid) {
     r.error = 9;
     return r;
   }
-  return Call(idx, 2, {uint8_t(cid >> 8), uint8_t(cid & 0xFF)});
+  const uint8_t p[2] = {uint8_t(cid >> 8), uint8_t(cid & 0xFF)};
+  return CallDev(devIdx, idx, 2, p, sizeof p, 450, p, 2);
 }
 
 }  // namespace hidpp

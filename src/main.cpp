@@ -117,6 +117,7 @@ class App : public UiHost {
   void OpenDiagnostics() override;
   bool HasHaptics() override { return presenter_.HasHaptics(); }
   bool HasActionButton() override { return presenter_.HasActionButton(); }
+  bool HasPressure() override { return presenter_.HasPressure(); }
   LPARAM RemoteButtons() override { return buttons_; }
   LPARAM RemoteSeen() override { return seen_; }
   bool RemoteConnected() override { return presenter_.Connected(); }
@@ -253,6 +254,7 @@ int App::Run(HINSTANCE inst, bool background, Effect demo) {
   AddTrayIcon();
 
   optionsPlus_ = IsLogiOptionsRunning();
+  Log("app: Logi Options+ %s", optionsPlus_ ? "is running" : "is not running");
   SetTimer(hwnd_, TIMER_OPTIONS_PLUS, 30000, nullptr);
 
   if (firstRun) {
@@ -358,6 +360,7 @@ Presenter::Config App::PresenterConfig() const {
   c.laserDst = uint16_t(s_.laserDstCid);
   c.hapticEnabled = s_.haptics != HapticMode::Off;
   c.hapticLevel = s_.hapticStrength;
+  c.pressure = s_.pressure;
   return c;
 }
 
@@ -759,6 +762,7 @@ LRESULT App::Handle(UINT msg, WPARAM w, LPARAM l) {
           const bool running = IsLogiOptionsRunning();
           if (running != optionsPlus_) {
             optionsPlus_ = running;
+            Log("app: Logi Options+ %s", running ? "started" : "stopped");
             UpdateTray();
             if (running && !optionsPlusWarned_) {
               optionsPlusWarned_ = true;

@@ -10,6 +10,9 @@
 //  * Do not divert raw XY, or the gyro stops moving the pointer.
 //  * Commands sent back-to-back are silently dropped, so they are spaced out.
 //  * Vibration is feature 0x19B0 (setState fn 2, playWaveform fn 4).
+//  * How hard the highlight button must be pressed is feature 0x19C0 (force sensing
+//    button; "pressure: Soft / Medium / Hard" in Logi Options+). We send it whenever the
+//    remote (re)connects, like the button setup, in case the remote has lost it.
 #pragma once
 #include "common.h"
 
@@ -32,6 +35,7 @@ enum : uint16_t {
   F_BATTERY_STATUS = 0x1000,
   F_UNIFIED_BATTERY = 0x1004,
   F_HAPTIC = 0x19B0,
+  F_FORCE_BUTTON = 0x19C0,
   F_PRESENTER = 0x1A00,
   F_REPROG_V4 = 0x1B04,
   F_WIRELESS_STATUS = 0x1D4B,
@@ -92,8 +96,11 @@ class Device {
   Reply Call(uint8_t featIdx, uint8_t fn, std::initializer_list<uint8_t> params,
              int timeoutMs = 450);
   Reply CallBuf(uint8_t featIdx, uint8_t fn, const uint8_t* params, size_t n, int timeoutMs);
+  // expect/expectLen: the reply must start with these bytes (e.g. the CID a
+  // setCidReporting reply echoes), so a late answer to an earlier request is never
+  // mistaken for this one.
   Reply CallDev(uint8_t dev, uint8_t featIdx, uint8_t fn, const uint8_t* params, size_t n,
-                int timeoutMs);
+                int timeoutMs, const uint8_t* expect = nullptr, size_t expectLen = 0);
   // Fire and forget (no wait for the reply).
   bool Send(uint8_t featIdx, uint8_t fn, std::initializer_list<uint8_t> params);
 
@@ -117,6 +124,8 @@ class Device {
   std::condition_variable cv_;
   bool pending_ = false, done_ = false;
   uint8_t pDev_ = 0, pFeat_ = 0, pFnSw_ = 0;
+  uint8_t pExpect_[2]{};
+  size_t pExpectLen_ = 0;
   Reply reply_;
   static double lastWrite_;  // shared: the remote cares about spacing, not about our objects
   std::map<uint16_t, uint8_t> features_;
@@ -124,5 +133,15 @@ class Device {
 
 bool IsSpotlightPid(uint16_t pid);
 bool IsReceiverPid(uint16_t pid);
+
+// Force sensing value for a "pressure" choice like the one in Logi Options+:
+// 0 Soft = halfway between the lightest press the remote allows and its default,
+// 1 Medium = the remote's own default, 2 Firm = halfway between the default and the firmest.
+inline uint16_t PressureTarget(uint16_t def, uint16_t mn, uint16_t mx, int preset) {
+  int t = def;
+  if (preset == 0) t = mn + (int(def) - mn) / 2;
+  else if (preset == 2) t = def + (int(mx) - def) / 2;
+  return uint16_t(t < mn ? mn : t > mx ? mx : t);
+}
 
 }  // namespace hidpp

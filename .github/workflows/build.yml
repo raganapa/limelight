@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Attach the .exe files to this existing release (for example v1.0.1)"
+        description: "Attach the .exe files to this existing release (for example v1.0.2)"
         required: false
         default: ""
 

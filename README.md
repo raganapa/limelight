@@ -20,6 +20,7 @@ no cloud. It talks to the remote directly over Logitech's HID++ protocol, the sa
 - **Light press and hard press** on the highlight button each get their own effect, like
   Logitech's app. The remote's two pressure levels are read directly, so effects appear the
   instant you press and vanish the instant you let go.
+- **Hard press force** — Soft, Medium or Firm, the same choice as *pressure* in Logi Options+.
 - **Smooth**: frames are synced to your display's refresh (60/120/144 Hz), only the pixels that
   change are redrawn, effects fade in and out, and the pointer is hidden while an effect is on.
 - **Vibration** feedback on hard press (or every press).
@@ -92,6 +93,9 @@ show what every button sends (option 2) and test vibration (option 3).
   hard. *Light press* and *Hard press* in the **Remote check** row light up while pressed (and get
   a tick once seen). If neither lights up but the spotlight still appears, the app is not getting
   the remote's button messages; send the log file below.
+- **The light press works but the hard press does nothing** — set **Hard press force** to *Soft*
+  in Settings and try again with the Remote check row. Limelight sends this setting to the remote
+  each time it connects or wakes up, and checks it whenever you start a light press.
 - **"Looking for your Spotlight 2…"** — press any button to wake the remote. Over Bluetooth,
   make sure it is paired in Windows Settings. With the USB receiver, make sure the receiver that
   came with the remote is plugged in.
@@ -122,7 +126,7 @@ pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-nsis
 
 The GitHub Actions workflow in `.github/workflows/build.yml` builds both files on every push and
 runs the protocol tests on a real Windows runner. **To publish a release with the .exe files:**
-on GitHub go to *Releases → Draft a new release*, create a tag such as `v1.0.1`, and click
+on GitHub go to *Releases → Draft a new release*, create a tag such as `v1.0.2`, and click
 *Publish*. A few minutes later `Limelight-Setup.exe` and `Limelight.exe` appear under the
 release's *Assets*. For a release that already exists, open *Actions → build → Run workflow*
 and enter its tag. (You can always attach the files by hand too: edit the release and drop them
@@ -155,6 +159,9 @@ What the Spotlight 2 does over HID++ (none of it is documented by Logitech):
   stops moving the pointer.
 - Commands sent back to back are silently dropped, so they are spaced out.
 - Vibration is feature `0x19B0` (`setState` = function 2, `playWaveform` = function 4).
+- How hard the hard press is: feature `0x19C0` (force sensing button: function 1 gives the
+  default/max/min, 2 reads and 3 sets the value; Logi Options+ calls it *pressure*). Limelight
+  sends it each time the remote connects or wakes up, in case the remote has lost it.
 
 Credits: the button and pressure-level findings come from
 [spotlight2-linux (foco)](https://github.com/fmesasc/spotlight2-linux) and the Spotlight 2 work in

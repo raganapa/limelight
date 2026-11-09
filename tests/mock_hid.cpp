@@ -27,6 +27,10 @@ bool receiver = false;       // simulate a Logi Bolt receiver instead of Bluetoo
 // hard press (no answer). Each of these used to leave the hard press dead.
 bool quirky = false;
 bool droppedHardOnce = false;
+// Force sensing (0x19C0), one button. After a restart the remote has no usable pressure
+// setting until a host sends one (the quirky remote has no such feature: fixed threshold).
+const uint16_t kForceDef = 200, kForceMin = 40, kForceMax = 400, kForceUnset = 0xFFFF;
+uint16_t forceCur = kForceUnset;
 int deliberateDrops = 0;
 const uint8_t kSlot = 2;     // the Spotlight's pairing slot on the receiver
 const uint8_t kOtherSlot = 1;  // another Logitech device (a mouse) on the same receiver
@@ -38,7 +42,7 @@ struct Feat {
 };
 const Feat kFeats[] = {{0, 0x0000}, {1, 0x0001}, {2, 0x0003}, {3, 0x0005}, {9, 0x1004},
                        {11, 0x1B04}, {12, 0x1814}, {13, 0x1815}, {17, 0x1A01}, {20, 0x19B0},
-                       {21, 0x1D4B}, {27, 0x18A1}};
+                       {21, 0x1D4B}, {22, 0x19C0}, {27, 0x18A1}};
 struct Ctl {
   uint16_t cid, flags;
   uint8_t group, gmask;
@@ -130,6 +134,7 @@ void Handle(const uint8_t* q) {
         uint8_t idx = 0;
         for (auto& f : kFeats)
           if (f.id == want) idx = f.idx;
+        if (quirky && want == 0x19C0) idx = 0;
         Reply(q, {idx, 0, 0});
       } else if (fn == 1) {
         Reply(q, {4, 5, p[2]});
@@ -163,6 +168,22 @@ void Handle(const uint8_t* q) {
       if (fn == 0) Reply(q, {0, 0, 0, 0, 0x00, 0x00, 0x40, 0xBF});
       else Reply(q, {});
       return;
+    case 0x19C0:
+      if (quirky) return Error(q, 6);
+      if (fn == 0) return Reply(q, {1});
+      if (p[0] != 0) return Error(q, 2);
+      if (fn == 1)
+        return Reply(q, {0x00, 0x01, uint8_t(kForceDef >> 8), uint8_t(kForceDef),
+                         uint8_t(kForceMax >> 8), uint8_t(kForceMax), uint8_t(kForceMin >> 8),
+                         uint8_t(kForceMin)});
+      if (fn == 2) return Reply(q, {uint8_t(forceCur >> 8), uint8_t(forceCur)});
+      if (fn == 3) {
+        const uint16_t v = uint16_t((p[1] << 8) | p[2]);
+        if (v < kForceMin || v > kForceMax) return Error(q, 2);
+        forceCur = v;
+        return Reply(q, {});
+      }
+      return Error(q, 7);
     case 0x1B04: {
       if (fn == 0) return Reply(q, {uint8_t(sizeof kCtls / sizeof kCtls[0])});
       if (fn == 1) {
@@ -216,11 +237,48 @@ void PressButtons(std::initializer_list<uint16_t> cids) {
   Push(r);
 }
 
+void Press(int force) {
+  std::vector<uint16_t> cids;
+  {
+    std::lock_guard<std::mutex> lk(m);
+    const int threshold = quirky ? 150 : forceCur;
+    const bool hard = force > 0 && force >= threshold && (reporting[0x01A8] & 0x01);
+    if (hard) cids.push_back(0x01A8);  // like the real remote: the hard level alone
+    else if (force > 0 && (reporting[0x00D8] & 0x01)) cids.push_back(0x00D8);
+  }
+  std::vector<uint8_t> r(20, 0);
+  r[0] = 0x11;
+  r[1] = receiver ? kSlot : 0x01;
+  r[2] = 11;
+  r[3] = quirky ? 0x05 : 0x00;
+  for (size_t i = 0; i < cids.size(); ++i) {
+    r[4 + 2 * i] = uint8_t(cids[i] >> 8);
+    r[5 + 2 * i] = uint8_t(cids[i]);
+  }
+  Push(r);
+}
+
+int ForceValue() {
+  std::lock_guard<std::mutex> lk(m);
+  return forceCur;
+}
+
+void ForgetPressure() {
+  std::lock_guard<std::mutex> lk(m);
+  forceCur = kForceUnset;
+}
+
+void ForgetHardPress() {
+  std::lock_guard<std::mutex> lk(m);
+  reporting[0x01A8] = 0;
+}
+
 void ForgetSetup() {
   std::lock_guard<std::mutex> lk(m);
   reporting.clear();
   remaps.clear();
   lastFlags.clear();
+  forceCur = kForceUnset;
 }
 
 void AnnounceReconnect() {

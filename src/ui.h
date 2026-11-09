@@ -16,6 +16,7 @@ struct UiHost {
   virtual void OpenDiagnostics() = 0;
   virtual bool HasHaptics() = 0;
   virtual bool HasActionButton() = 0;
+  virtual bool HasPressure() = 0;          // the remote lets us set how hard the hard press is
   virtual LPARAM RemoteButtons() = 0;      // BTN_* bits pressed right now
   virtual LPARAM RemoteSeen() = 0;         // BTN_* bits pressed at least once so far
   virtual bool RemoteConnected() = 0;

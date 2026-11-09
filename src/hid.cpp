@@ -133,20 +133,24 @@ bool HidChannel::Write(const uint8_t* data, size_t len) {
   OVERLAPPED ov{};
   ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   DWORD wrote = 0;
+  bool timedOut = false;
   BOOL ok = WriteFile(h_, b.data(), DWORD(b.size()), &wrote, &ov);
-  if (!ok && GetLastError() == ERROR_IO_PENDING) {
+  DWORD err = ok ? 0 : GetLastError();
+  if (!ok && err == ERROR_IO_PENDING) {
     if (WaitForSingleObject(ov.hEvent, 1000) == WAIT_OBJECT_0) {
       ok = GetOverlappedResult(h_, &ov, &wrote, FALSE);
+      err = ok ? 0 : GetLastError();
     } else {
       CancelIoEx(h_, &ov);
       GetOverlappedResult(h_, &ov, &wrote, TRUE);
       ok = FALSE;
+      timedOut = true;
     }
   }
   CloseHandle(ov.hEvent);
-  if (!ok) {
-    // Some Bluetooth stacks only accept HidD_SetOutputReport.
+  // Some Bluetooth stacks only accept HidD_SetOutputReport. Not when the remote is
+  // simply not connected (asleep): that call can block for many seconds.
+  if (!ok && !timedOut && err != ERROR_DEVICE_NOT_CONNECTED)
     ok = HidD_SetOutputReport(h_, b.data(), ULONG(b.size()));
-  }
   return ok != FALSE;
 }

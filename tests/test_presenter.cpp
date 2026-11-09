@@ -127,6 +127,61 @@ int main(int argc, char** argv) {
     CHECK(b[3] == 0);
   }
 
+  printf("pressure (how hard the hard press is)\n");
+  if (!quirky) {
+    CHECK(p.HasPressure());
+    CHECK(mock::ForceValue() == 200);  // Medium = the remote's own default, sent at connect
+    c.pressure = 0;
+    p.Configure(c);
+    Pump(400);
+    CHECK(mock::ForceValue() == 120);  // Soft: halfway to the lightest
+    c.pressure = 2;
+    p.Configure(c);
+    Pump(400);
+    CHECK(mock::ForceValue() == 300);  // Firm: halfway to the firmest
+    c.pressure = 1;
+    p.Configure(c);
+    Pump(400);
+    CHECK(mock::ForceValue() == 200);
+  } else {
+    CHECK(!p.HasPressure());  // this remote has no such feature: nothing is sent
+  }
+  g_events.clear();
+  mock::Press(300);  // a firm press
+  Pump(150);
+  mock::Press(0);
+  Pump(150);
+  b = Buttons();
+  CHECK(b.size() == 2 && b[0] == BTN_HARD && b[1] == 0);
+
+  printf("remote lost its pressure setting without telling us\n");
+  Pump(2200);  // the setup check runs at most every few seconds
+  mock::ForgetPressure();
+  g_events.clear();
+  mock::Press(60);  // light press: Limelight checks the setup straight away...
+  Pump(300);
+  mock::Press(300);  // ...so pressing all the way still works
+  Pump(150);
+  mock::Press(0);
+  Pump(150);
+  b = Buttons();
+  CHECK(b.size() == 3 && b[0] == BTN_SOFT && b[1] == BTN_HARD && b[2] == 0);
+  if (!quirky) CHECK(mock::ForceValue() == 200);
+
+  printf("remote stopped reporting the hard press without telling us\n");
+  Pump(3200);
+  mock::ForgetHardPress();
+  g_events.clear();
+  mock::Press(60);
+  Pump(300);
+  mock::Press(300);
+  Pump(150);
+  mock::Press(0);
+  Pump(150);
+  b = Buttons();
+  CHECK(b.size() == 3 && b[0] == BTN_SOFT && b[1] == BTN_HARD && b[2] == 0);
+  CHECK(Rep(0x01A8) == 1);
+
   printf("haptics\n");
   size_t before;
   {
@@ -169,6 +224,7 @@ int main(int argc, char** argv) {
   Pump(1500);
   CHECK(Rep(0x00D8) == 1);
   CHECK(Rep(0x01A8) == 1);
+  if (!quirky) CHECK(mock::ForceValue() == 200);  // pressure sent again
 
   printf("pause / resume (diagnostics)\n");
   p.Pause(true);

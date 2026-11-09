@@ -23,11 +23,12 @@ class Presenter {
     uint16_t laserSrc = 0, laserDst = 0;
     bool hapticEnabled = true;
     int hapticLevel = 60;
+    int pressure = 1;  // force needed for the hard press: 0 soft, 1 medium, 2 firm
     bool operator==(const Config& o) const {
       return divertSoft == o.divertSoft && divertHard == o.divertHard &&
              divertAction == o.divertAction && laserOn == o.laserOn && laserSrc == o.laserSrc &&
              laserDst == o.laserDst && hapticEnabled == o.hapticEnabled &&
-             hapticLevel == o.hapticLevel;
+             hapticLevel == o.hapticLevel && pressure == o.pressure;
     }
   };
 
@@ -46,6 +47,7 @@ class Presenter {
   bool Charging() const { return charging_.load(); }
   bool HasHaptics() const { return hasHaptics_.load(); }
   bool HasActionButton() const { return hasAction_.load(); }
+  bool HasPressure() const { return hasPressure_.load(); }  // force needed is adjustable
   bool Paused() const { return paused_.load(); }
   std::wstring DeviceName() const;
 
@@ -56,8 +58,11 @@ class Presenter {
   void Disconnect();
   void ApplyConfig(bool deviceForgot);
   void RestoreDevice();
-  void VerifyDiversion();
+  void QuickCheck();
   uint8_t DivertFlags(uint16_t cid, bool on) const;
+  void ReadForceButtons();
+  void ApplyPressure(int preset, bool always);
+  bool CheckPressure(int preset);
   void ReadBattery();
   void OnNotify(const uint8_t* r, size_t n);
   void OnGone();
@@ -69,6 +74,7 @@ class Presenter {
   std::condition_variable cv_;
   // requests (guarded by m_)
   bool quit_ = false, rescan_ = true, reconfigure_ = false, gone_ = false;
+  bool checkReq_ = false;  // a light press just started: check the setup now
   bool pauseReq_ = false, resumeReq_ = false, cfgDirty_ = true;
   std::vector<uint8_t> hapticQueue_;
   Config cfg_;
@@ -83,22 +89,31 @@ class Presenter {
   bool laserApplied_ = false;
   uint16_t laserAppliedSrc_ = 0;
   double lastAttempt_ = -1e9, lastBattery_ = 0, lastReconfigure_ = 0;
-  double retryAt_ = 0, nextVerify_ = 0;
+  double retryAt_ = 0, nextCheck_ = 0;
   int retryRounds_ = 0;
   bool readBackUnreliable_ = false;
   bool needSetup_ = false;  // some button could not be set up yet
   int failedAttempts_ = 0;
+  int checkLogs_ = 0;       // limits the log lines QuickCheck writes
+  // Force sensing (0x19C0): how hard each pressure-sensing button must be pressed.
+  struct ForceButton {
+    uint8_t index = 0;
+    bool changeable = false, curOk = false, appliedOk = false;
+    uint16_t def = 0, max = 0, min = 0, cur = 0;
+    uint16_t applied = 0;  // what the remote reported back after we set it
+  };
+  std::vector<ForceButton> force_;
+  int pressureApplied_ = -1;
 
   // read from reader threads
   std::atomic<uint8_t> devIdx_{0xFF}, idxReprog_{0}, idxHaptic_{0}, idxBattery_{0},
-      idxWireless_{0};
+      idxWireless_{0}, idxForce_{0};
   std::atomic<bool> viaReceiver_{false}, unifiedBattery_{true};
   std::atomic<LPARAM> buttons_{0};
   std::atomic<int> otherMessages_{0};
-  std::atomic<bool> pressedSinceVerify_{false};
 
   // status
   std::atomic<bool> connected_{false}, charging_{false}, hasHaptics_{false}, hasAction_{false},
-      paused_{false};
+      hasPressure_{false}, paused_{false};
   std::atomic<int> transport_{0}, battery_{-1};
 };

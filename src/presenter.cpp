@@ -2,6 +2,7 @@
 #include "presenter.h"
 
 #include <chrono>
+#include <cstdlib>
 
 using namespace hidpp;
 
@@ -88,9 +89,10 @@ void Presenter::OnNotify(const uint8_t* r, size_t n) {
     if (rx && r[1] != devIdx_.load()) return;
     const uint8_t feat = r[2], fn = uint8_t(r[3] >> 4);
     if (feat == 0xFF) return;  // an error report for some request
-    // Button events normally carry software ID 0, but the check is deliberately left
-    // out (as in foco and Projecteur): a remote that tags its events differently would
-    // otherwise look completely dead. Replies to our own requests never get here.
+    if ((r[3] & 0x0F) == kSwId) return;  // a late answer to one of our own requests
+    // Button events normally carry software ID 0, but only our own ID is ruled out (as
+    // in foco and Projecteur): a remote that tags its events differently would
+    // otherwise look completely dead.
     const uint8_t ir = idxReprog_.load();
     if (ir && feat == ir && fn == 0 && n >= 12) {
       LPARAM mask = 0;
@@ -100,8 +102,17 @@ void Presenter::OnNotify(const uint8_t* r, size_t n) {
         else if (cid == CID_HIGHLIGHT_HARD) mask |= BTN_HARD;
         else if (cid == CID_ACTION) mask |= BTN_ACTION;
       }
-      if ((mask & BTN_SOFT) && !(buttons_.load() & BTN_SOFT)) pressedSinceVerify_ = true;
-      if (buttons_.exchange(mask) != mask) {
+      const LPARAM prev = buttons_.exchange(mask);
+      if ((mask & BTN_SOFT) && !(prev & (BTN_SOFT | BTN_HARD))) {
+        // A light press just started, so the remote is awake: let the worker make sure
+        // the hard press is still set up before the button is pressed all the way.
+        {
+          std::lock_guard<std::mutex> lk(m_);
+          checkReq_ = true;
+        }
+        cv_.notify_all();
+      }
+      if (prev != mask) {
         Log("presenter: buttons %s%s%s%s (%02X %02X %02X %02X %02X %02X)",
             (mask & BTN_SOFT) ? "light " : "", (mask & BTN_HARD) ? "hard " : "",
             (mask & BTN_ACTION) ? "action " : "", mask ? "" : "released", r[3], r[4], r[5],
@@ -153,13 +164,13 @@ void Presenter::Run() {
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   while (true) {
     bool doRescan = false, doReconfigure = false, gone = false, pauseReq = false,
-         resumeReq = false, cfgDirty = false;
+         resumeReq = false, cfgDirty = false, doCheck = false;
     std::vector<uint8_t> haptics;
     {
       std::unique_lock<std::mutex> lk(m_);
       cv_.wait_for(lk, std::chrono::milliseconds(1000), [this] {
         return quit_ || rescan_ || reconfigure_ || gone_ || pauseReq_ || resumeReq_ ||
-               !hapticQueue_.empty() || cfgDirty_;
+               !hapticQueue_.empty() || cfgDirty_ || checkReq_;
       });
       if (quit_) break;
       doRescan = rescan_;
@@ -168,7 +179,8 @@ void Presenter::Run() {
       pauseReq = pauseReq_;
       resumeReq = resumeReq_;
       cfgDirty = cfgDirty_;
-      rescan_ = reconfigure_ = gone_ = pauseReq_ = resumeReq_ = false;
+      doCheck = checkReq_;
+      rescan_ = reconfigure_ = gone_ = pauseReq_ = resumeReq_ = checkReq_ = false;
       haptics.swap(hapticQueue_);
     }
 
@@ -209,7 +221,7 @@ void Presenter::Run() {
 
     if (doReconfigure) {
       if (now - lastReconfigure_ > 400) {
-        Sleep(300);  // give a waking device a moment
+        Sleep(120);  // give a waking device a moment
         ApplyConfig(true);
         lastReconfigure_ = NowMs();
         ReadBattery();
@@ -227,7 +239,7 @@ void Presenter::Run() {
     }
     // Checked only right after a press, when the remote is awake anyway: polling a
     // sleeping remote would keep its radio busy and drain the battery.
-    if (pressedSinceVerify_.exchange(false) && NowMs() >= nextVerify_) VerifyDiversion();
+    if (doCheck) QuickCheck();
     if (now - lastBattery_ > 5 * 60 * 1000) ReadBattery();
   }
   if (dev_) {
@@ -297,6 +309,7 @@ void Presenter::Adopt(std::unique_ptr<Device> d, const std::string& name) {
   if (!ib) ib = dev_->FeatureIndex(F_BATTERY_STATUS);
   idxBattery_ = ib;
   idxWireless_ = dev_->FeatureIndex(F_WIRELESS_STATUS);
+  idxForce_ = dev_->FeatureIndex(F_FORCE_BUTTON);
   controls_ = dev_->ReadControls(false);
   hasHaptics_ = idxHaptic_.load() != 0;
   bool action = false;
@@ -310,15 +323,17 @@ void Presenter::Adopt(std::unique_ptr<Device> d, const std::string& name) {
   const HidInfo& li = dev_->LongInfo();
   transport_ = dev_->viaReceiver ? 1 : 2;
   Log("presenter: connected to '%s' (pid %04X, %s, device index 0x%02X), %zu controls, "
-      "reprog@%d haptic@%d battery@%d wireless@%d",
+      "reprog@%d haptic@%d battery@%d wireless@%d force@%d",
       name.c_str(), li.pid, dev_->viaReceiver ? "receiver" : "bluetooth", dev_->devIdx,
       controls_.size(), idxReprog_.load(), idxHaptic_.load(), idxBattery_.load(),
-      idxWireless_.load());
+      idxWireless_.load(), idxForce_.load());
   for (auto& k : controls_)
     Log("  control %04X (%s) flags %04X group %d gmask %02X", k.cid, ControlName(k.cid), k.flags,
         k.group, k.gmask);
+  ReadForceButtons();
   diverted_.clear();
   laserApplied_ = false;
+  pressureApplied_ = -1;
   ApplyConfig(true);
   ReadBattery();
   connected_ = true;
@@ -336,12 +351,16 @@ void Presenter::Disconnect() {
   retryRounds_ = 0;
   readBackUnreliable_ = false;
   needSetup_ = false;
-  idxReprog_ = idxHaptic_ = idxBattery_ = idxWireless_ = 0;
+  force_.clear();
+  pressureApplied_ = -1;
+  checkLogs_ = 0;
+  idxReprog_ = idxHaptic_ = idxBattery_ = idxWireless_ = idxForce_ = 0;
   buttons_ = 0;
   transport_ = 0;
   battery_ = -1;
   hasHaptics_ = false;
   hasAction_ = false;
+  hasPressure_ = false;
   if (connected_.exchange(false)) Post(PE_DISCONNECTED, 0);
 }
 
@@ -421,7 +440,11 @@ void Presenter::ApplyConfig(bool deviceForgot) {
       if (r.error && r.error != 8) break;  // a definite "no" (8 = busy: try again)
     }
     if (!r.ok) {
-      if (r.error && r.error != 8) {
+      // The two levels of the highlight button exist on every Spotlight 2, so a "no"
+      // for them is taken as "not now" (e.g. the remote is still waking up) and they
+      // are asked for again later. Anything else that is refused is left alone.
+      const bool level = cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD;
+      if (r.error && r.error != 8 && !level) {
         unsupported_.insert(cid);
         Log("presenter: the remote refuses %04X (%s); not asking again", cid, ControlName(cid));
       } else {
@@ -431,10 +454,21 @@ void Presenter::ApplyConfig(bool deviceForgot) {
     }
     diverted_.insert(cid);
     Reply g = dev_->GetCidReporting(cid);
-    const bool kept = g.ok && (g.d[2] & 0x01);
-    if (g.ok && !kept) readBackUnreliable_ = true;
-    Log("presenter: divert %04X (%s) flags %02X -> ok%s", cid, ControlName(cid), flags,
-        !g.ok ? "" : kept ? ", confirmed" : ", but reading it back says otherwise");
+    bool kept = g.ok && (g.d[2] & 0x01);
+    bool secondTry = false;
+    if (g.ok && !kept) {
+      // It answered but did not keep it (it drops commands that come too close
+      // together): say it once more, a little later, and look again.
+      secondTry = true;
+      Sleep(120);
+      dev_->SetCidReporting(cid, flags, 0);
+      g = dev_->GetCidReporting(cid);
+      kept = g.ok && (g.d[2] & 0x01);
+      if (g.ok && !kept) readBackUnreliable_ = true;
+    }
+    Log("presenter: divert %04X (%s) flags %02X -> ok%s%s", cid, ControlName(cid), flags,
+        !g.ok ? "" : kept ? ", confirmed" : ", but reading it back says otherwise",
+        secondTry ? " (second try)" : "");
   }
   if (missing) {
     ++retryRounds_;
@@ -445,7 +479,7 @@ void Presenter::ApplyConfig(bool deviceForgot) {
     retryAt_ = 0;
     needSetup_ = false;
   }
-  nextVerify_ = NowMs() + 15000;
+  nextCheck_ = NowMs() + 2000;
   // 4) Laser remap.
   if (laser && c.laserDst && !laserApplied_) {
     Reply r = dev_->SetCidReporting(c.laserSrc, uint8_t(DivertFlags(c.laserSrc, false)), c.laserDst);
@@ -453,6 +487,11 @@ void Presenter::ApplyConfig(bool deviceForgot) {
     laserApplied_ = r.ok;
     laserAppliedSrc_ = c.laserSrc;
   }
+
+  // 5) How hard the hard press is. Sent every time the remote (re)connects, in case it
+  //    lost it: without a usable value the hard press may never fire, even though the
+  //    button itself is set up.
+  ApplyPressure(c.pressure, deviceForgot || pressureApplied_ != c.pressure);
 
   const uint8_t ih = idxHaptic_.load();
   if (ih) {
@@ -463,27 +502,144 @@ void Presenter::ApplyConfig(bool deviceForgot) {
   }
 }
 
-// After a light press (at most every 15 s), check that the remote still reports both
-// levels of the highlight button to us. It forgets after sleeping, and another app
-// (Logi Options+) may change it behind our back.
-void Presenter::VerifyDiversion() {
-  nextVerify_ = NowMs() + 15000;
-  if (!dev_) return;
+// Right after a light press starts (the remote is awake then, so nothing is polled while
+// it sleeps), at most every few seconds: make sure the hard press will still work. The
+// remote forgets its setup when it restarts, and over Bluetooth nothing tells us when
+// that happens, so this is the moment to notice - before the button is pressed all the way.
+void Presenter::QuickCheck() {
+  const double now = NowMs();
+  if (!dev_ || now < nextCheck_) return;
+  nextCheck_ = now + 3000;
   if (needSetup_) {
     Log("presenter: finishing the button setup");
     ApplyConfig(false);
     return;
   }
-  if (readBackUnreliable_) return;
-  for (uint16_t cid : {CID_HIGHLIGHT_HARD, CID_HIGHLIGHT_SOFT}) {
-    if (!diverted_.count(cid)) continue;
-    Reply g = dev_->GetCidReporting(cid);
-    if (g.ok && !(g.d[2] & 0x01)) {
-      Log("presenter: %04X is no longer reported to us -> setting the buttons up again", cid);
-      ApplyConfig(true);
-      return;
+  Config c;
+  {
+    std::lock_guard<std::mutex> lk(m_);
+    c = cfg_;
+  }
+  CheckPressure(c.pressure);
+  if (!diverted_.count(CID_HIGHLIGHT_HARD) || (buttons_.load() & BTN_HARD)) return;
+  const uint8_t flags = DivertFlags(CID_HIGHLIGHT_HARD, true);
+  if (readBackUnreliable_) {
+    // This remote does not tell us the truth when asked, so just say it again.
+    Reply r = dev_->SetCidReporting(CID_HIGHLIGHT_HARD, flags, 0);
+    if (checkLogs_ < 3) {
+      ++checkLogs_;
+      Log("presenter: hard press set up again (as a precaution): %s", r.Describe().c_str());
+    }
+    return;
+  }
+  Reply g = dev_->GetCidReporting(CID_HIGHLIGHT_HARD);
+  if (!g.ok || (g.d[2] & 0x01)) return;
+  Reply r = dev_->SetCidReporting(CID_HIGHLIGHT_HARD, flags, 0);
+  Log("presenter: the remote had forgotten the hard press; set up again: %s",
+      r.Describe().c_str());
+  if (c.divertAction && diverted_.count(CID_ACTION)) {
+    Reply a = dev_->GetCidReporting(CID_ACTION);
+    if (a.ok && !(a.d[2] & 0x01))
+      dev_->SetCidReporting(CID_ACTION, DivertFlags(CID_ACTION, true), 0);
+  }
+}
+
+namespace {
+uint16_t Be16(const uint8_t* p) { return uint16_t((p[0] << 8) | p[1]); }
+}  // namespace
+
+// Force sensing button (0x19C0): fn0 count, fn1 capabilities (changeable, default, max,
+// min), fn2 current value, fn3 set value. Larger values need a firmer press.
+void Presenter::ReadForceButtons() {
+  force_.clear();
+  hasPressure_ = false;
+  const uint8_t fi = idxForce_.load();
+  if (!dev_ || !fi) return;
+  Reply n = dev_->Call(fi, 0, {});
+  if (!n.ok) {
+    Log("presenter: force sensing: count -> %s", n.Describe().c_str());
+    return;
+  }
+  const int count = std::min<int>(n.d[0], 4);
+  for (int b = 0; b < count; ++b) {
+    Reply caps = dev_->Call(fi, 1, {uint8_t(b)});
+    Reply cur = dev_->Call(fi, 2, {uint8_t(b)});
+    if (!caps.ok) {
+      Log("presenter: force button %d: capabilities -> %s", b, caps.Describe().c_str());
+      continue;
+    }
+    ForceButton f;
+    f.index = uint8_t(b);
+    f.changeable = (caps.d[1] & 0x01) != 0;
+    f.def = Be16(caps.d + 2);
+    f.max = Be16(caps.d + 4);
+    f.min = Be16(caps.d + 6);
+    f.curOk = cur.ok;
+    f.cur = cur.ok ? Be16(cur.d) : 0;
+    const bool sane = f.max > f.min && f.def >= f.min && f.def <= f.max;
+    Log("presenter: force button %d: now %s (default %u, range %u..%u)%s%s", b,
+        cur.ok ? std::to_string(f.cur).c_str() : cur.Describe().c_str(), f.def, f.min, f.max,
+        f.changeable ? "" : ", not changeable", sane ? "" : ", values look odd: left alone");
+    if (!sane) f.changeable = false;
+    if (f.changeable) hasPressure_ = true;
+    force_.push_back(f);
+  }
+}
+
+void Presenter::ApplyPressure(int preset, bool always) {
+  const uint8_t fi = idxForce_.load();
+  if (!dev_ || !fi) return;
+  for (auto& f : force_) {
+    if (!f.changeable) continue;
+    const uint16_t target = PressureTarget(f.def, f.min, f.max, preset);
+    if (!always && f.curOk && f.cur == target) continue;
+    const uint16_t before = f.cur;
+    const bool beforeOk = f.curOk;
+    const uint8_t p[3] = {f.index, uint8_t(target >> 8), uint8_t(target & 0xFF)};
+    Reply r = dev_->CallBuf(fi, 3, p, sizeof p, 450);
+    Reply g = dev_->Call(fi, 2, {f.index});
+    f.curOk = g.ok;
+    if (g.ok) f.cur = Be16(g.d);
+    f.appliedOk = r.ok;
+    f.applied = g.ok ? f.cur : target;  // the remote may round what it is given
+    char was[16] = "?";
+    if (beforeOk) snprintf(was, sizeof was, "%u", before);
+    Log("presenter: pressure for force button %u: %s -> %u (%s)%s", f.index, was, target,
+        r.Describe().c_str(), g.ok && f.cur != target ? ", but it reads back differently" : "");
+  }
+  pressureApplied_ = preset;
+}
+
+// Returns true when the remote had lost the pressure setting and it was sent again.
+bool Presenter::CheckPressure(int preset) {
+  const uint8_t fi = idxForce_.load();
+  if (!dev_ || !fi) return false;
+  bool fixed = false;
+  for (auto& f : force_) {
+    if (!f.changeable) continue;
+    Reply g = dev_->Call(fi, 2, {f.index});
+    if (!g.ok) continue;
+    const uint16_t cur = Be16(g.d), target = PressureTarget(f.def, f.min, f.max, preset);
+    const uint16_t expected = f.appliedOk ? f.applied : target;
+    const int slack = std::max(1, (f.max - f.min) / 100);  // ignore rounding in the remote
+    f.cur = cur;
+    f.curOk = true;
+    if (std::abs(int(cur) - int(expected)) <= slack) continue;
+    const uint8_t p[3] = {f.index, uint8_t(target >> 8), uint8_t(target & 0xFF)};
+    Reply r = dev_->CallBuf(fi, 3, p, sizeof p, 450);
+    if (r.ok) {
+      f.cur = target;
+      f.appliedOk = true;
+      f.applied = target;
+    }
+    fixed = true;
+    if (checkLogs_ < 6) {
+      ++checkLogs_;
+      Log("presenter: the remote had lost the pressure setting (force button %u was %u); "
+          "set to %u again: %s", f.index, cur, target, r.Describe().c_str());
     }
   }
+  return fixed;
 }
 
 void Presenter::RestoreDevice() {

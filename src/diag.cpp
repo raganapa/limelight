@@ -99,6 +99,57 @@ std::string Flags(uint16_t f) {
   return s.empty() ? "-" : s;
 }
 
+const char* kPressureNames[] = {"Soft", "Medium", "Firm"};
+
+// Force sensing (0x19C0): how hard the highlight button must be pressed for each level.
+// apply = set it the way Limelight does (the "Hard press force" choice in Settings).
+// Returns false if the remote has no adjustable pressure.
+bool Pressure(bool apply) {
+  const uint8_t fi = g_dev->FeatureIndex(F_FORCE_BUTTON);
+  if (!fi) {
+    Out("Pressure (force sensing 19C0): not offered by this remote.\n");
+    return false;
+  }
+  Reply n = g_dev->Call(fi, 0, {});
+  if (!n.ok) {
+    Out("Pressure (force sensing 19C0): count -> %s\n", n.Describe().c_str());
+    return false;
+  }
+  Settings s;
+  s.Load();
+  s.Sanitize();
+  bool any = false;
+  Out("Pressure (force sensing 19C0): %u button(s)\n", n.d[0]);
+  for (int b = 0; b < std::min<int>(n.d[0], 4); ++b) {
+    Reply caps = g_dev->Call(fi, 1, {uint8_t(b)});
+    Reply cur = g_dev->Call(fi, 2, {uint8_t(b)});
+    if (!caps.ok) {
+      Out("  button %d: capabilities -> %s\n", b, caps.Describe().c_str());
+      continue;
+    }
+    const bool changeable = caps.d[1] & 1;
+    const uint16_t def = uint16_t((caps.d[2] << 8) | caps.d[3]);
+    const uint16_t mx = uint16_t((caps.d[4] << 8) | caps.d[5]);
+    const uint16_t mn = uint16_t((caps.d[6] << 8) | caps.d[7]);
+    Out("  button %d: now %s, default %u, range %u..%u%s   [%s]\n", b,
+        cur.ok ? std::to_string((cur.d[0] << 8) | cur.d[1]).c_str() : cur.Describe().c_str(),
+        def, mn, mx, changeable ? "" : ", not changeable", Hex(caps.d, 8).c_str());
+    const bool sane = changeable && mx > mn && def >= mn && def <= mx;
+    if (!sane) continue;
+    any = true;
+    if (!apply) continue;
+    const uint16_t t = PressureTarget(def, mn, mx, s.pressure);
+    const uint8_t p[3] = {uint8_t(b), uint8_t(t >> 8), uint8_t(t & 0xFF)};
+    Reply w = g_dev->CallBuf(fi, 3, p, sizeof p, 450);
+    Reply g = g_dev->Call(fi, 2, {uint8_t(b)});
+    Out("  button %d set to %u (%s, as in Settings): %s, reads back %s\n", b, t,
+        kPressureNames[s.pressure], w.Describe().c_str(),
+        g.ok ? std::to_string((g.d[0] << 8) | g.d[1]).c_str() : g.Describe().c_str());
+    Sleep(40);
+  }
+  return any;
+}
+
 void Undo() {
   if (!g_dev || !g_dev->IsOpen()) return;
   for (uint16_t cid : g_diverted) g_dev->SetCidReporting(cid, uint8_t(0x02 | RawValid(cid)), 0);
@@ -276,6 +327,7 @@ void Report() {
     Out("Haptics: capabilities %s / state %s\n", c.ok ? Hex(c.d, 8).c_str() : c.Describe().c_str(),
         s.ok ? Hex(s.d, 4).c_str() : s.Describe().c_str());
   }
+  Pressure(false);
   // Read-only peek (function 0) at features we have no name for.
   auto safe = [](uint16_t id) {
     if (id == 0x0020 || (id >= 0x00C0 && id <= 0x00DF)) return false;  // reset / firmware update
@@ -294,6 +346,8 @@ void Report() {
 // ------------------------------------------------------------------ watch
 void Watch() {
   if (g_controls.empty()) g_controls = g_dev->ReadControls(true);
+  Out("\n");
+  const bool pressure = Pressure(true);  // like Limelight does
   Out("\nSetting the buttons to report here (temporarily)...\n");
   std::vector<uint16_t> cids = {CID_HIGHLIGHT_SOFT, CID_HIGHLIGHT_HARD};  // always, like the app
   for (auto& k : g_controls)
@@ -323,6 +377,10 @@ void Watch() {
   fgets(line, sizeof line, stdin);
   Out("\nSummary: light press %s, hard press %s.\n", (g_seen & 1) ? "SEEN" : "not seen",
       (g_seen & 2) ? "SEEN" : "not seen");
+  if ((g_seen & 1) && !(g_seen & 2))
+    Out(pressure ? "If you did press hard: in Settings set \"Hard press force\" to Soft and try\n"
+                   "again with the Remote check row there.\n"
+                 : "This remote does not let Limelight set how hard the hard press is.\n");
   Out("Restoring the buttons...\n");
   for (uint16_t cid : g_diverted) {
     const bool level = cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD;
