@@ -374,7 +374,8 @@ Reply Device::SetCidReporting(uint16_t cid, uint8_t flags, uint16_t remap) {
   }
   const uint8_t p[5] = {uint8_t(cid >> 8), uint8_t(cid & 0xFF), flags, uint8_t(remap >> 8),
                         uint8_t(remap & 0xFF)};
-  return CallDev(devIdx, idx, 3, p, sizeof p, 450, p, 2);  // the reply echoes the CID
+  // The reply echoes the CID. The remote sometimes takes over half a second to answer.
+  return CallDev(devIdx, idx, 3, p, sizeof p, 700, p, 2);
 }
 
 Reply Device::GetCidReporting(uint16_t cid) {
@@ -385,7 +386,7 @@ Reply Device::GetCidReporting(uint16_t cid) {
     return r;
   }
   const uint8_t p[2] = {uint8_t(cid >> 8), uint8_t(cid & 0xFF)};
-  return CallDev(devIdx, idx, 2, p, sizeof p, 450, p, 2);
+  return CallDev(devIdx, idx, 2, p, sizeof p, 700, p, 2);
 }
 
 }  // namespace hidpp

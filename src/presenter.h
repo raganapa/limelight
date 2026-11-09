@@ -16,6 +16,10 @@
 class Presenter {
  public:
   struct Config {
+    // Leave the light press to the remote and tell it apart by the pointer moving (the
+    // app does that): on the Spotlight 2, taking the light press over stops the remote
+    // from reporting the hard press at all.
+    bool lightFromMotion = true;
     bool divertSoft = true;
     bool divertHard = true;
     bool divertAction = false;
@@ -29,7 +33,8 @@ class Presenter {
       return divertSoft == o.divertSoft && divertHard == o.divertHard &&
              divertAction == o.divertAction && laserOn == o.laserOn && laserSrc == o.laserSrc &&
              laserDst == o.laserDst && hapticEnabled == o.hapticEnabled &&
-             hapticLevel == o.hapticLevel && pressure == o.pressure && hardCid == o.hardCid;
+             hapticLevel == o.hapticLevel && pressure == o.pressure && hardCid == o.hardCid &&
+             lightFromMotion == o.lightFromMotion;
     }
   };
 
@@ -39,6 +44,8 @@ class Presenter {
   void PlayHaptic(uint8_t waveform);
   void Rescan();
   void Reconfigure();
+  // The remote is being used (the app saw it move the pointer): check its setup now.
+  void Activity();
   // Release the device so another program (the diagnostics tool) can use it.
   void Pause(bool pause);
 
@@ -49,6 +56,11 @@ class Presenter {
   bool HasHaptics() const { return hasHaptics_.load(); }
   bool HasActionButton() const { return hasAction_.load(); }
   bool HasPressure() const { return hasPressure_.load(); }  // force needed is adjustable
+  // True while the light press is left to the remote: the app treats the remote moving the
+  // pointer as "light press held".
+  bool LightFromMotion() const { return lightFromMotion_.load(); }
+  // Behind a receiver that other devices also use, pointer motion could be theirs.
+  bool ReceiverShared() const { return receiverShared_.load(); }
   bool Paused() const { return paused_.load(); }
   std::wstring DeviceName() const;
 
@@ -117,6 +129,7 @@ class Presenter {
   std::atomic<int> otherMessages_{0};
 
   // status
+  std::atomic<bool> lightFromMotion_{false}, receiverShared_{false};
   std::atomic<bool> connected_{false}, charging_{false}, hasHaptics_{false}, hasAction_{false},
       hasPressure_{false}, paused_{false};
   std::atomic<int> transport_{0}, battery_{-1};

@@ -61,6 +61,7 @@ void Settings::Load() {
   actionButton = ActionMode(GetInt(L"Buttons", L"ActionButton", int(d.actionButton), p));
   pressure = GetInt(L"Buttons", L"HardPressLevel", d.pressure, p);
   hardCid = GetInt(L"Buttons", L"HardPressCid", 0, p);
+  lightFromMotion = GetInt(L"Buttons", L"LightPressFromMotion", 1, p) != 0;
 
   spotRadius = GetInt(L"Look", L"SpotlightSize", d.spotRadius, p);
   dimPercent = GetInt(L"Look", L"Dim", d.dimPercent, p);
@@ -115,6 +116,7 @@ void Settings::Save() const {
   PutInt(L"Buttons", L"ActionButton", int(actionButton), p);
   PutInt(L"Buttons", L"HardPressLevel", pressure, p);
   PutInt(L"Buttons", L"HardPressCid", hardCid, p);
+  PutInt(L"Buttons", L"LightPressFromMotion", lightFromMotion, p);
 
   PutInt(L"Look", L"SpotlightSize", spotRadius, p);
   PutInt(L"Look", L"Dim", dimPercent, p);

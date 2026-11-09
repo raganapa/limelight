@@ -54,6 +54,14 @@ void Presenter::Reconfigure() {
   cv_.notify_all();
 }
 
+void Presenter::Activity() {
+  {
+    std::lock_guard<std::mutex> lk(m_);
+    checkReq_ = true;
+  }
+  cv_.notify_all();
+}
+
 void Presenter::Pause(bool pause) {
   std::unique_lock<std::mutex> lk(m_);
   if (pause) {
@@ -332,6 +340,23 @@ void Presenter::Adopt(std::unique_ptr<Device> d, const std::string& name) {
     Log("  control %04X (%s) flags %04X group %d gmask %02X", k.cid, ControlName(k.cid), k.flags,
         k.group, k.gmask);
   ReadForceButtons();
+  // Behind a receiver: does another device (a mouse, a keyboard) use it too? Then pointer
+  // motion cannot tell us the presenter's light press is held.
+  bool shared = false;
+  if (dev_->viaReceiver) {
+    const uint8_t p[2] = {0x00, 0x01};
+    for (uint8_t idx = 1; idx <= 6 && !shared; ++idx) {
+      if (idx == dev_->devIdx) continue;
+      Reply r = dev_->CallDev(idx, 0x00, 0, p, sizeof p, 250);
+      // An answer, or "that is an older device" (1), means someone is there; "unknown
+      // device" (8) is an empty slot, and a sleeping device does not answer.
+      if (r.ok || r.error == 0x01) {
+        shared = true;
+        Log("presenter: device %d also uses this receiver", idx);
+      }
+    }
+  }
+  receiverShared_ = shared;
   diverted_.clear();
   laserApplied_ = false;
   pressureApplied_ = -1;
@@ -362,6 +387,8 @@ void Presenter::Disconnect() {
   hasHaptics_ = false;
   hasAction_ = false;
   hasPressure_ = false;
+  lightFromMotion_ = false;
+  receiverShared_ = false;
   if (connected_.exchange(false)) Post(PE_DISCONNECTED, 0);
 }
 
@@ -393,11 +420,22 @@ void Presenter::ApplyConfig(bool deviceForgot) {
     return nullptr;
   };
   const bool laser = c.laserOn && c.laserSrc;
+  // Leave the light press to the remote when it has a hard press and the app can see its
+  // pointer motion (not on a receiver another device shares).
+  bool hasHard = false;
+  for (auto& k : controls_)
+    if (k.cid == CID_HIGHLIGHT_HARD) hasHard = true;
+  const bool motion = c.lightFromMotion && hasHard && !(dev_->viaReceiver && receiverShared_);
+  if (motion != lightFromMotion_.load())
+    Log("presenter: light press %s", motion ? "left to the remote (seen as pointer motion)"
+                                            : "reported over HID++");
+  lightFromMotion_ = motion;
   std::set<uint16_t> want;
   // Both levels of the highlight button are always diverted, even when the remote's
   // control list came back incomplete or did not mark them divertable: the commands are
   // known to work, and a missing hard press is far worse than one extra command.
-  if (c.divertSoft && !(laser && c.laserSrc == CID_HIGHLIGHT_SOFT)) want.insert(CID_HIGHLIGHT_SOFT);
+  if (c.divertSoft && !motion && !(laser && c.laserSrc == CID_HIGHLIGHT_SOFT))
+    want.insert(CID_HIGHLIGHT_SOFT);
   if (c.divertHard && !(laser && c.laserSrc == CID_HIGHLIGHT_HARD)) want.insert(CID_HIGHLIGHT_HARD);
   // On some remotes the hard press arrives as another control (found by the hard press
   // finder in diagnostics).
@@ -409,6 +447,12 @@ void Presenter::ApplyConfig(bool deviceForgot) {
   }
   for (uint16_t cid : unsupported_) want.erase(cid);
 
+  // 0) The light press must not stay taken over (an earlier version, or a crash, may have
+  //    left it that way): that alone stops the hard press from being reported.
+  if (motion && deviceForgot && !(laser && c.laserSrc == CID_HIGHLIGHT_SOFT)) {
+    Reply r = dev_->SetCidReporting(CID_HIGHLIGHT_SOFT, DivertFlags(CID_HIGHLIGHT_SOFT, false), 0);
+    Log("presenter: light press handed back to the remote: %s", r.Describe().c_str());
+  }
   // 1) Undo a laser remap that is no longer wanted (before re-diverting that control).
   if (laserApplied_ && (!laser || !c.laserDst || laserAppliedSrc_ != c.laserSrc)) {
     Reply r = dev_->SetCidReporting(laserAppliedSrc_, 0x00, laserAppliedSrc_);
@@ -529,6 +573,14 @@ void Presenter::QuickCheck() {
   }
   CheckPressure(c.pressure);
   if (buttons_.load() & BTN_HARD) return;
+  if (lightFromMotion_.load() && !readBackUnreliable_) {
+    // Something took the light press over again (the hard press stops working then).
+    Reply g = dev_->GetCidReporting(CID_HIGHLIGHT_SOFT);
+    if (g.ok && (g.d[2] & 0x01)) {
+      Reply r = dev_->SetCidReporting(CID_HIGHLIGHT_SOFT, DivertFlags(CID_HIGHLIGHT_SOFT, false), 0);
+      Log("presenter: the light press had been taken over; handed back: %s", r.Describe().c_str());
+    }
+  }
   bool forgot = false;
   for (uint16_t cid : {uint16_t(CID_HIGHLIGHT_HARD), c.hardCid}) {
     if (!cid || !diverted_.count(cid)) continue;

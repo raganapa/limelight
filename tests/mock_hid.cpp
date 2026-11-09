@@ -250,8 +250,12 @@ void Press(int force) {
   {
     std::lock_guard<std::mutex> lk(m);
     const int threshold = quirky ? 150 : forceCur;
+    // Like the user's Spotlight 2 over Bluetooth: while the light press is taken over, the
+    // remote never reports the hard press.
+    const bool lightTakenKillsHard = !receiver && !quirky;
     const bool hard = force > 0 && force >= threshold && (reporting[hardAs] & 0x01) &&
-                      (!needsDefaultForce || forceCur <= kForceDef);
+                      (!needsDefaultForce || forceCur <= kForceDef) &&
+                      !(lightTakenKillsHard && (reporting[0x00D8] & 0x01));
     if (hard) cids.push_back(hardAs);  // like the real remote: the hard level alone
     else if (force > 0 && (reporting[0x00D8] & 0x01)) cids.push_back(0x00D8);
   }

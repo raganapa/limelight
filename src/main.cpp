@@ -118,7 +118,7 @@ class App : public UiHost {
   bool HasHaptics() override { return presenter_.HasHaptics(); }
   bool HasActionButton() override { return presenter_.HasActionButton(); }
   bool HasPressure() override { return presenter_.HasPressure(); }
-  LPARAM RemoteButtons() override { return buttons_; }
+  LPARAM RemoteButtons() override { return buttons_ | (MotionLight() ? BTN_SOFT : 0); }
   LPARAM RemoteSeen() override { return seen_; }
   bool RemoteConnected() override { return presenter_.Connected(); }
   bool Autostart() override { return AutostartEnabled(); }
@@ -143,6 +143,10 @@ class App : public UiHost {
   void OnRawInput(HRAWINPUT h);
   int Classify(HANDLE dev);
   void OnRemoteMotion();
+  // The light press, when it is left to the remote: it is held while the remote moves the
+  // pointer (its gyro reports constantly while the button is down).
+  bool MotionLight() const { return presenter_.LightFromMotion() && NowMs() < motionUntil_; }
+  bool RemoteHeld() const { return (buttons_ & (BTN_SOFT | BTN_HARD)) || MotionLight(); }
   void Latch(Effect e);
   void Haptic(uint8_t wf) {
     if (s_.haptics != HapticMode::Off) presenter_.PlayHaptic(wf);
@@ -361,6 +365,7 @@ Presenter::Config App::PresenterConfig() const {
   c.hapticEnabled = s_.haptics != HapticMode::Off;
   c.hapticLevel = s_.hapticStrength;
   c.pressure = s_.pressure;
+  c.lightFromMotion = s_.lightFromMotion;
   c.hardCid = uint16_t(s_.hardCid);
   return c;
 }
@@ -405,11 +410,12 @@ Effect App::Desired() const {
   const bool laserOnSoft = s_.physicalLaser && s_.laserKnown && s_.laserSrcCid == 0x00D8;
   const bool laserOnHard = s_.physicalLaser && s_.laserKnown && s_.laserSrcCid == 0x01A8;
   if (buttons_ & BTN_HARD) return laserOnHard ? Effect::None : s_.hardPress;
-  if (buttons_ & BTN_SOFT) {
+  if ((buttons_ & BTN_SOFT) || MotionLight()) {
+    // Letting go of a hard press passes through the light press for a moment.
     if (now < holdHardUntil_) return laserOnHard ? Effect::None : s_.hardPress;
     return laserOnSoft ? Effect::None : s_.softPress;
   }
-  if (now < motionUntil_) return s_.softPress;
+  if (now < motionUntil_) return s_.softPress;  // HID++ not working: motion means pressed
   if (previewEffect_ != Effect::None) return previewEffect_;
   return latched_;
 }
@@ -429,10 +435,8 @@ void App::Recenter() {
 void App::UpdateEffect() {
   const Effect e = Desired();
   if (e == shown_) return;
-  const bool previewing = previewEffect_ != Effect::None && e == previewEffect_ &&
-                          !(buttons_ & (BTN_SOFT | BTN_HARD));
-  const bool fromRemote =
-      !previewing && (latched_ == Effect::None || (buttons_ & (BTN_SOFT | BTN_HARD)));
+  const bool previewing = previewEffect_ != Effect::None && e == previewEffect_ && !RemoteHeld();
+  const bool fromRemote = !previewing && (latched_ == Effect::None || RemoteHeld());
   if (shown_ == Effect::None && e != Effect::None && fromRemote && s_.recenter &&
       NowMs() - lastEffectEnd_ > 3000 && e != Effect::Draw)
     Recenter();
@@ -462,7 +466,8 @@ void App::OnButtons(LPARAM mask) {
   seen_ |= mask;
   RepaintSettingsWindow();
   lastButtonChange_ = NowMs();
-  motionUntil_ = 0;
+  const bool motionMode = presenter_.LightFromMotion();
+  if (!motionMode) motionUntil_ = 0;  // HID++ reports the light press: motion means nothing
   const bool hardDown = (mask & BTN_HARD) && !(old & BTN_HARD);
   const bool hardUp = !(mask & BTN_HARD) && (old & BTN_HARD);
   const bool anyDown = (mask & (BTN_SOFT | BTN_HARD)) && !(old & (BTN_SOFT | BTN_HARD));
@@ -472,6 +477,11 @@ void App::OnButtons(LPARAM mask) {
   if (hardUp && (mask & BTN_SOFT)) {
     holdHardUntil_ = NowMs() + 170;
     SetTimer(hwnd_, TIMER_HOLD, 180, nullptr);
+  } else if (hardUp && motionMode) {
+    // Whether the button is still held lightly only shows in the pointer motion that
+    // follows, so keep the hard-press effect a little longer.
+    holdHardUntil_ = NowMs() + 300;
+    SetTimer(hwnd_, TIMER_HOLD, 310, nullptr);
   }
   if (hardDown) {
     holdHardUntil_ = 0;
@@ -553,6 +563,24 @@ void App::OnRemoteMotion() {
     motionBurst_ = 0;
   }
   ++motionBurst_;
+  if (presenter_.LightFromMotion()) {
+    // The light press is left to the remote (taking it over stops the hard press from
+    // being reported), so the remote moving the pointer is how we know it is held.
+    const bool wasHeld = now < motionUntil_;
+    if (!wasHeld && motionBurst_ < 3) return;  // ignore stray packets
+    motionUntil_ = now + 250;
+    SetTimer(hwnd_, TIMER_MOTION, 40, nullptr);
+    if (!wasHeld) {
+      seen_ |= BTN_SOFT;
+      softDownAt_ = now;
+      if (!(buttons_ & BTN_HARD)) latched_ = Effect::None;  // the remote takes over
+      presenter_.Activity();  // the remote is awake: a good moment to check its setup
+      if (s_.haptics == HapticMode::EveryPress) Haptic(kWaveSubtle);
+      RepaintSettingsWindow();
+    }
+    UpdateEffect();
+    return;
+  }
   if (buttons_ & (BTN_SOFT | BTN_HARD)) return;   // HID++ is doing its job
   if (now - lastButtonChange_ < 400) return;      // trailing motion after a release
   if (motionBurst_ < 4) return;                   // ignore stray packets
@@ -577,8 +605,16 @@ void App::OnRawInput(HRAWINPUT h) {
   if (GetRawInputData(h, RID_INPUT, buf, &size, sizeof(RAWINPUTHEADER)) == UINT(-1)) return;
   const RAWINPUT* ri = reinterpret_cast<const RAWINPUT*>(buf);
   if (ri->header.dwType == RIM_TYPEMOUSE) {
-    if ((ri->data.mouse.lLastX || ri->data.mouse.lLastY) && Classify(ri->header.hDevice) == 1)
-      OnRemoteMotion();
+    const RAWMOUSE& m = ri->data.mouse;
+    const bool moved = m.lLastX || m.lLastY;
+    // With the light press left to the remote, every motion report counts (even one that
+    // did not move: the gyro is on, so the button is held), and so does motion through a
+    // receiver that only the presenter uses.
+    const bool motionMode = presenter_.LightFromMotion();
+    if (moved || (motionMode && m.usButtonFlags == 0)) {
+      const int kind = Classify(ri->header.hDevice);
+      if (kind == 1 || (kind == 2 && motionMode && !presenter_.ReceiverShared())) OnRemoteMotion();
+    }
   } else if (ri->header.dwType == RIM_TYPEKEYBOARD) {
     const RAWKEYBOARD& kb = ri->data.keyboard;
     if (kb.Message != WM_KEYDOWN && kb.Message != WM_SYSKEYDOWN) return;
@@ -756,7 +792,10 @@ LRESULT App::Handle(UINT msg, WPARAM w, LPARAM l) {
           if (latched_ == demo_) Latch(demo_);
           break;
         case TIMER_MOTION:
-          if (NowMs() >= motionUntil_) KillTimer(hwnd_, TIMER_MOTION);
+          if (NowMs() >= motionUntil_) {
+            KillTimer(hwnd_, TIMER_MOTION);
+            RepaintSettingsWindow();  // the Remote check shows the light press let go
+          }
           UpdateEffect();
           break;
         case TIMER_OPTIONS_PLUS: {

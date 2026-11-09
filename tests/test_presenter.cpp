@@ -88,6 +88,9 @@ int main(int argc, char** argv) {
   HWND hwnd = CreateWindowW(L"PresenterTest", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
                             wc.hInstance, nullptr);
 
+  // Over Bluetooth the light press is left to the remote (the app sees it as pointer
+  // motion); behind this receiver, which a mouse also uses, it is taken over as before.
+  const bool motion = !rx;
   printf("connect\n");
   Presenter p;
   Presenter::Config c;
@@ -100,9 +103,15 @@ int main(int argc, char** argv) {
   CHECK(p.Battery() == 83);
   CHECK(p.HasHaptics());
   CHECK(p.HasActionButton());
-  CHECK(Rep(0x00D8) == 1);  // diverted
-  CHECK(Rep(0x01A8) == 1);
-  {
+  CHECK(p.LightFromMotion() == motion);
+  CHECK(p.ReceiverShared() == rx);
+  CHECK(Rep(0x01A8) == 1);  // the hard press is reported to us
+  if (motion) {
+    CHECK(Rep(0x00D8) == 0);  // the light press is explicitly left to the remote
+    std::lock_guard<std::mutex> lk(mock::m);
+    CHECK(mock::lastFlags[0x00D8] == 0x22);  // (raw XY explicitly off as well)
+  } else {
+    CHECK(Rep(0x00D8) == 1);  // taken over...
     std::lock_guard<std::mutex> lk(mock::m);
     CHECK(mock::lastFlags[0x00D8] == 0x23);  // ...with raw XY explicitly switched off
   }
@@ -163,13 +172,17 @@ int main(int argc, char** argv) {
   mock::ForgetPressure();
   g_events.clear();
   mock::Press(60);  // light press: Limelight checks the setup straight away...
+  if (motion) p.Activity();  // (the app sees the pointer move and says so)
   Pump(300);
   mock::Press(300);  // ...so pressing all the way still works
   Pump(150);
   mock::Press(0);
   Pump(150);
   b = Buttons();
-  CHECK(b.size() == 3 && b[0] == BTN_SOFT && b[1] == BTN_HARD && b[2] == 0);
+  if (motion)
+    CHECK(b.size() == 2 && b[0] == BTN_HARD && b[1] == 0);
+  else
+    CHECK(b.size() == 3 && b[0] == BTN_SOFT && b[1] == BTN_HARD && b[2] == 0);
   if (!quirky) CHECK(mock::ForceValue() == 200);
 
   printf("remote stopped reporting the hard press without telling us\n");
@@ -177,14 +190,55 @@ int main(int argc, char** argv) {
   mock::ForgetHardPress();
   g_events.clear();
   mock::Press(60);
+  if (motion) p.Activity();
   Pump(300);
   mock::Press(300);
   Pump(150);
   mock::Press(0);
   Pump(150);
   b = Buttons();
-  CHECK(b.size() == 3 && b[0] == BTN_SOFT && b[1] == BTN_HARD && b[2] == 0);
+  if (motion)
+    CHECK(b.size() == 2 && b[0] == BTN_HARD && b[1] == 0);
+  else
+    CHECK(b.size() == 3 && b[0] == BTN_SOFT && b[1] == BTN_HARD && b[2] == 0);
   CHECK(Rep(0x01A8) == 1);
+
+  if (motion) {
+    printf("light press taken over again behind our back\n");
+    Pump(3200);
+    mock::reporting[0x00D8] = 0x01;  // (e.g. another program)
+    p.Activity();
+    Pump(400);
+    CHECK(Rep(0x00D8) == 0);  // handed back, so...
+    g_events.clear();
+    mock::Press(300);  // ...the hard press keeps working
+    Pump(150);
+    mock::Press(0);
+    Pump(150);
+    b = Buttons();
+    CHECK(b.size() == 2 && b[0] == BTN_HARD && b[1] == 0);
+  }
+  if (motion && !quirky) {
+    printf("taking the light press over (older versions) stops the hard press\n");
+    c.lightFromMotion = false;
+    p.Configure(c);
+    Pump(400);
+    CHECK(!p.LightFromMotion());
+    CHECK(Rep(0x00D8) == 1);
+    g_events.clear();
+    mock::Press(300);
+    Pump(150);
+    mock::Press(0);
+    Pump(150);
+    b = Buttons();
+    CHECK(b.size() == 2 && b[0] == BTN_SOFT && b[1] == 0);  // light only: the bug users saw
+    c.lightFromMotion = true;
+    p.Configure(c);
+    Pump(400);
+    CHECK(p.LightFromMotion());
+    CHECK(Rep(0x00D8) == 0);
+    g_events.clear();
+  }
 
   printf("hard press reported as another control (found by the finder)\n");
   mock::SetHardAs(0x00FB);
@@ -239,13 +293,13 @@ int main(int argc, char** argv) {
   p.Configure(c);
   Pump(400);
   CHECK(Remap(0x00D8) == 0x00D8);  // remap undone
-  CHECK(Rep(0x00D8) == 1);      // diverted again
+  CHECK(Rep(0x00D8) == (motion ? 0 : 1));  // back to how it was
 
   printf("remote slept and woke up\n");
   mock::ForgetSetup();
   mock::AnnounceReconnect();
   Pump(1500);
-  CHECK(Rep(0x00D8) == 1);
+  CHECK(Rep(0x00D8) == (motion ? 0 : 1));
   CHECK(Rep(0x01A8) == 1);
   if (!quirky) CHECK(mock::ForceValue() == 200);  // pressure sent again
 
@@ -258,7 +312,8 @@ int main(int argc, char** argv) {
   g_events.clear();
   p.Pause(false);
   CHECK(WaitFor(PE_CONNECTED, 6000));
-  CHECK(Rep(0x00D8) == 1);
+  CHECK(Rep(0x00D8) == (motion ? 0 : 1));
+  CHECK(Rep(0x01A8) == 1);
 
   printf("shutdown\n");
   p.Stop();

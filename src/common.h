@@ -40,7 +40,7 @@
 #include <vector>
 
 #define APP_NAME L"Limelight"
-#define APP_VERSION L"1.0.3"
+#define APP_VERSION L"1.0.4"
 #define APP_MAIN_CLASS L"LimelightMainWindow"
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE

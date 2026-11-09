@@ -411,10 +411,14 @@ void Watch() {
   if (g_controls.empty()) g_controls = g_dev->ReadControls(true);
   Out("\n");
   const bool pressure = Pressure(true);  // like Limelight does
-  Out("\nSetting the buttons to report here (temporarily)...\n");
-  std::vector<uint16_t> cids = {CID_HIGHLIGHT_SOFT, CID_HIGHLIGHT_HARD};  // always, like the app
+  Out("\nSetting the buttons to report here (temporarily)...\n"
+      "  (The light press is left to the remote, like Limelight does: taking it over stops\n"
+      "  the remote from reporting the hard press.)\n");
+  g_dev->SetCidReporting(CID_HIGHLIGHT_SOFT, 0x22, 0);
+  Sleep(40);
+  std::vector<uint16_t> cids = {CID_HIGHLIGHT_HARD};  // always, like the app
   for (auto& k : g_controls)
-    if ((k.flags & KF_DIVERTABLE) && !(k.flags & KF_VIRTUAL) &&
+    if ((k.flags & KF_DIVERTABLE) && !(k.flags & KF_VIRTUAL) && k.cid != CID_HIGHLIGHT_SOFT &&
         std::find(cids.begin(), cids.end(), k.cid) == cids.end())
       cids.push_back(k.cid);
   for (uint16_t cid : cids) {
@@ -438,12 +442,10 @@ void Watch() {
   g_t0 = NowMs();
   char line[64];
   fgets(line, sizeof line, stdin);
-  Out("\nSummary: light press %s, hard press %s.\n", (g_seen & 1) ? "SEEN" : "not seen",
-      (g_seen & 2) ? "SEEN" : "not seen");
-  if ((g_seen & 1) && !(g_seen & 2))
-    Out(pressure ? "If you did press hard: in Settings set \"Hard press force\" to Soft and try\n"
-                   "again with the Remote check row there.\n"
-                 : "This remote does not let Limelight set how hard the hard press is.\n");
+  Out("\nSummary: hard press %s.\n", (g_seen & 2) ? "SEEN" : "not seen");
+  if (!(g_seen & 2))
+    Out("If you did press hard: try option 3, the Hard press finder.%s\n",
+        pressure ? "" : " (This remote does not let Limelight set how hard the hard press is.)");
   Out("Restoring the buttons...\n");
   for (uint16_t cid : g_diverted) {
     const bool level = cid == CID_HIGHLIGHT_SOFT || cid == CID_HIGHLIGHT_HARD;
@@ -540,11 +542,19 @@ void Reset() {  // put every control (and the force setting) back the way it was
   if (g_forceChanged) RestoreForce();
 }
 
-bool Base(std::string& note) {  // what Limelight itself does with the buttons
+bool Base(std::string& note) {  // both levels taken over (what Limelight 1.0.3 did)
   const bool a = Divert(CID_HIGHLIGHT_SOFT, 0x23, note);
   const bool b = Divert(CID_HIGHLIGHT_HARD, 0x23, note);
   Haptic(true);
   return a && b;
+}
+
+bool Motion(std::string& note) {  // what Limelight does now: only the hard press taken over
+  g_dev->SetCidReporting(CID_HIGHLIGHT_SOFT, 0x22, 0);
+  Sleep(40);
+  const bool ok = Divert(CID_HIGHLIGHT_HARD, 0x23, note);
+  Haptic(true);
+  return ok;
 }
 
 // Listen for up to `seconds`; stop early once a hard press was seen and let go.
@@ -642,14 +652,17 @@ void HardPressFinder() {
     const char* note;  // shown to the user, or nullptr
     std::function<bool(std::string&)> apply;  // false = not possible here: skipped
     int save;  // 0 nothing needed, 1 force Medium, 2 force Lightest, 3 other control,
-               // 4 vibration off, 5 needs a change in Limelight
+               // 4 vibration off, 5 needs a change in Limelight, 6 both levels taken over
   };
   const std::vector<Step> steps = {
-      {"Limelight's button setup", nullptr, [](std::string& n) { return Base(n); }, 0},
+      {"Limelight's setup (light press left alone)", "the light press shows nothing here",
+       [](std::string& n) { return Motion(n); }, 0},
       {"Pressure set to the remote's default", nullptr,
-       [](std::string& n) { return Base(n) && Force(0, n); }, 1},
+       [](std::string& n) { return Motion(n) && Force(0, n); }, 1},
       {"Pressure set to the lightest", nullptr,
-       [](std::string& n) { return Base(n) && Force(1, n); }, 2},
+       [](std::string& n) { return Motion(n) && Force(1, n); }, 2},
+      {"Both levels taken over (Limelight 1.0.3)", nullptr,
+       [](std::string& n) { return Base(n); }, 6},
       {"Motion sent to the app, like Options+",
        "the pointer will not move during this step",
        [](std::string& n) {
@@ -661,7 +674,7 @@ void HardPressFinder() {
        5},
       {"Every button reported", "press only the highlight button",
        [](std::string& n) {
-         const bool ok = Base(n);
+         const bool ok = Motion(n);
          for (auto& k : g_controls)  // virtual ones too: the hard press might be one
            if ((k.flags & KF_DIVERTABLE) && k.cid != CID_HIGHLIGHT_SOFT &&
                k.cid != CID_HIGHLIGHT_HARD)
@@ -685,17 +698,10 @@ void HardPressFinder() {
          return a && b;
        },
        5},
-      {"Only the hard press reported", "a light press shows nothing during this step",
-       [](std::string& n) {
-         const bool ok = Divert(CID_HIGHLIGHT_HARD, 0x23, n);
-         Haptic(true);
-         return ok;
-       },
-       5},
       {"Vibration switched off", nullptr,
        [](std::string& n) {
          if (!g_hi) return false;
-         const bool ok = Base(n);
+         const bool ok = Motion(n);
          Haptic(false);
          return ok;
        },
@@ -727,8 +733,11 @@ void HardPressFinder() {
     Out("  NOW: press the highlight button HARD, hold it, let go%s%s%s\n", st.note ? " (" : "",
         st.note ? st.note : "", st.note ? ")" : "");
     const Rec rec = Listen(9);
+    // Controls that might be the hard press arriving as something else: not the light
+    // press, not a quick tap (left click) and not one of the other physical buttons.
     std::set<uint16_t> others = rec.during;
-    others.erase(CID_HIGHLIGHT_HARD);
+    for (uint16_t c : rec.all) others.insert(c);
+    for (uint16_t c : {0x00D8, 0x01A8, 0x0050, 0x00D9, 0x00DA, 0x00DB, 0x00DC}) others.erase(c);
     std::set<uint16_t> extra = rec.all;
     extra.erase(CID_HIGHLIGHT_SOFT);
     extra.erase(CID_HIGHLIGHT_HARD);
@@ -747,7 +756,7 @@ void HardPressFinder() {
     } else if (rec.raw) {
       snprintf(b, sizeof b, "motion only");
     } else {
-      snprintf(b, sizeof b, "nothing (no press seen)");
+      snprintf(b, sizeof b, "no hard press");
     }
     results[i] = b;
     if (rec.raw) results[i] += ", motion x" + std::to_string(rec.raw);
@@ -787,6 +796,9 @@ void HardPressFinder() {
       break;
     case 4:
       s.haptics = HapticMode::Off;
+      break;
+    case 6:
+      s.lightFromMotion = false;
       break;
     default:
       Out("\n*** Found a way (step %d), but Limelight needs a small change to use it.\n"

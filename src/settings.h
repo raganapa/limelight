@@ -17,6 +17,9 @@ struct Settings {
   ActionMode actionButton = ActionMode::Default;
   int pressure = 2;         // hard press force: 0 lightest, 1 soft, 2 medium, 3 firm
   int hardCid = 0;          // control the hard press arrives as, if not 0x01A8 (finder)
+  // Leave the light press to the remote and see it as pointer motion (needed for the hard
+  // press on the Spotlight 2). 0 = take it over with HID++ like older versions did.
+  bool lightFromMotion = true;
 
   // Look (sizes are in pixels at 100% display scaling).
   int spotRadius = 190;     // 80..500

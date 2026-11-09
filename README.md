@@ -18,8 +18,7 @@ no cloud. It talks to the remote directly over Logitech's HID++ protocol, the sa
 
 - **Five effects** — Spotlight, Squarelight, Magnifier, on-screen Laser dot and Draw.
 - **Light press and hard press** on the highlight button each get their own effect, like
-  Logitech's app. The remote's two pressure levels are read directly, so effects appear the
-  instant you press and vanish the instant you let go.
+  Logitech's app. Effects appear the instant you press and vanish the instant you let go.
 - **Hard press force** — Lightest, Soft, Medium or Firm, like *pressure* in Logi Options+.
 - **Smooth**: frames are synced to your display's refresh (60/120/144 Hz), only the pixels that
   change are redrawn, effects fade in and out, and the pointer is hidden while an effect is on.
@@ -130,7 +129,7 @@ pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-nsis
 
 The GitHub Actions workflow in `.github/workflows/build.yml` builds both files on every push and
 runs the protocol tests on a real Windows runner. **To publish a release with the .exe files:**
-on GitHub go to *Releases → Draft a new release*, create a tag such as `v1.0.3`, and click
+on GitHub go to *Releases → Draft a new release*, create a tag such as `v1.0.4`, and click
 *Publish*. A few minutes later `Limelight-Setup.exe` and `Limelight.exe` appear under the
 release's *Assets*. For a release that already exists, open *Actions → build → Run workflow*
 and enter its tag. (You can always attach the files by hand too: edit the release and drop them
@@ -163,6 +162,11 @@ What the Spotlight 2 does over HID++ (none of it is documented by Logitech):
 - The buttons report nothing until you ask with `0x1B04 setCidReporting`. Control `0x00D8` is the
   highlight button's light press and `0x01A8` its hard press. Raw XY must stay off, or the gyro
   stops moving the pointer.
+- **Taking over the light press (`0x00D8`) stops the remote from reporting the hard press.** So
+  Limelight leaves the light press to the remote, which moves the pointer with its gyro as
+  usual, treats that pointer motion as "light press held", and takes over only the hard press.
+  (Behind a receiver that a mouse also uses, pointer motion could be the mouse's, so there the
+  light press is taken over as before. `LightPressFromMotion=0` in settings.ini forces that.)
 - Commands sent back to back are silently dropped, so they are spaced out.
 - Vibration is feature `0x19B0` (`setState` = function 2, `playWaveform` = function 4).
 - How hard the hard press is: feature `0x19C0` (force sensing button: function 1 gives the
