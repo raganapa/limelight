@@ -1,0 +1,79 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Windows cross-compiler and NSIS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix nsis
+
+      - name: Build Limelight.exe, Limelight-Setup.exe and the tests
+        run: bash build.sh test
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Limelight
+          path: |
+            dist/Limelight.exe
+            dist/Limelight-Setup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tests
+          path: |
+            build/test_presenter.exe
+            dist/Limelight.exe
+
+  test-on-windows:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tests
+
+      - name: HID++ logic against the simulated remote
+        run: |
+          .\test_presenter.exe
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          .\test_presenter.exe receiver
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Smoke test (shows the spotlight for 5 seconds, then quits)
+        run: |
+          $p = Start-Process -FilePath .\Limelight.exe -ArgumentList '--background','--demo=spotlight' -PassThru
+          Start-Sleep -Seconds 9
+          Start-Process -FilePath .\Limelight.exe -ArgumentList '--quit' -Wait
+          Start-Sleep -Seconds 1
+          if (!$p.HasExited) { Stop-Process -Id $p.Id -Force }
+          $log = Get-Content "$env:LOCALAPPDATA\Limelight\limelight.log"
+          $log
+          if (-not ($log -match 'overlay: \d+ frames')) { Write-Error 'no frames were rendered'; exit 1 }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, test-on-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Limelight
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Limelight-Setup.exe
+            Limelight.exe

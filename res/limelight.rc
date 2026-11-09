@@ -1,0 +1,36 @@
+#include <windows.h>
+#include "resource.h"
+
+IDI_APP  ICON "limelight.ico"
+IDI_TRAY ICON "tray.ico"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "limelight.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Limelight (open source)"
+            VALUE "FileDescription", "Limelight - effects for the Logitech Spotlight 2"
+            VALUE "FileVersion", "1.0.0"
+            VALUE "InternalName", "Limelight"
+            VALUE "LegalCopyright", "MIT License"
+            VALUE "OriginalFilename", "Limelight.exe"
+            VALUE "ProductName", "Limelight"
+            VALUE "ProductVersion", "1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
